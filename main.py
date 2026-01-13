@@ -1,43 +1,52 @@
+# %%
 import os
 import gc
 
 import matplotlib
-from scipy.sparse import csr_matrix
-import pandas as pd
-import scanpy as sc
-import scvi
-import torch
-from anndata import AnnData
-from dotenv import load_dotenv
-
 # Supports file saving only; GUI rendering is not available
 matplotlib.use("Agg")
+
+from anndata import AnnData
+from dotenv import load_dotenv
+import matplotlib.pyplot as plt
+import matplotlib.patheffects as patheffects
+from matplotlib.axes import Axes
+import numpy as np
+import pandas as pd
+import scanpy as sc
+from scipy.sparse import csr_matrix
+import scvi
+import seaborn as sns
+import torch
+
+
 # **If you are using NVIDIA GPU** this will adjust `float32_matmul_precision` to 'high' (TF32, default 'highest which is FP32), which accelerates matrix multiplication.
 torch.set_float32_matmul_precision("high")
+
 # Loading .env
 load_dotenv()
-
 base_directory = os.getenv("PROCESSED_COUNT_FILE_LOCATION", ".")
-anndata_list : list[AnnData] = []
 
-def sc_rna_seq_preprocessing(csv_gz_path) -> AnnData:
+sns.set_theme(style="white", rc={"axes.facecolor": (0, 0, 0, 0)})
+
+# %%
+def load_data(csv_gz_path) -> AnnData:
     adata: AnnData = sc.read_csv(csv_gz_path).T
-    # Converting to csr_matrix for:
-    # 1. Memory efficiency (Not loading numerous zeros in memory)
-    # 2. Faster arithmetic and matrix vector operations
+    # Converting to csr_matrix for memory efficiency and speed
     if not isinstance(adata.X, csr_matrix):
         adata.X = csr_matrix(adata.X)
-    anndata = adata.copy()
+    adata.obs['Sample'] = "_".join(csv_gz_path.split('/')[-1].split('_')[:-2])
+    return adata
 
-    # =========================================================
-    # Removing Doublets
-    # =========================================================
+# Detecting Doublets
+def doublet_removal(adata: AnnData) -> AnnData:
+    vae_adata = adata.copy()
     # Keep genes which are expressed in at least 10 cells
-    sc.pp.filter_genes(adata, min_cells=10)
+    sc.pp.filter_genes(vae_adata, min_cells=10)
     # Select genes with high variance
     # VST (Variance Stabilizing Transformation) algorithm (in this case, seruat_v3) is applied due to high variance in genes with high level of expression
     # Variance Stabilization is needed to select genes with whose variance is higher than expected
-    sc.pp.highly_variable_genes(adata, n_top_genes=2000, subset=True, flavor="seurat_v3")
+    sc.pp.highly_variable_genes(vae_adata, n_top_genes=2000, subset=True, flavor="seurat_v3")
 
     # Single-Cell Variational Inference (SCVI) separates technical noise (batch effect, library size) from the data
     # By using ZINB (Zero-Inflated Negative Binominal) distribution, zero-inflation (too many zeros, because negative count is impossible) and overdispersion (dispersion greater than mean value, because certain RNAs exhibit minimal basal trnanscription but undergo rapid induction only under specific conditions) can be handled
@@ -45,11 +54,11 @@ def sc_rna_seq_preprocessing(csv_gz_path) -> AnnData:
 
     # Adds fields to the AnnData objet to make it ready for building a Pytorch neural network
     # By default every cell is considered as a single batch
-    scvi.model.SCVI.setup_anndata(adata)
+    scvi.model.SCVI.setup_anndata(vae_adata)
  
     # Constructs a VAE Pytorch neural network, not yet trained (Weights are initialized with random values)
     # Default dimension of SCVI latent space is 10
-    vae = scvi.model.SCVI(adata, n_latent=10)
+    vae = scvi.model.SCVI(vae_adata, n_latent=10)
     # Trains a VAE Pytorch neural network
     vae.train()
 
@@ -63,46 +72,116 @@ def sc_rna_seq_preprocessing(csv_gz_path) -> AnnData:
     # Trains a SOLO instance
     solo.train()
     # 'soft' True returns probabilities for singlet and doublet 
-    df = solo.predict(soft=True)
-    print(df.head())
-    # 'soft' False returns binary determination whether the cell is a singlet or a doublet
-    df["prediction"] = solo.predict(soft=False)
-    # Removes the suffix from the barcode
-    df.index = df.index.map(lambda x: x[:-2])
-
-    df["dif"] = df["doublet"] - df["singlet"]
-    doublets = df[(df["prediction"] == "doublet") & (df["dif"] > 1)]
-    anndata.obs["doublet"] = anndata.obs.index.isin(doublets.index)
-    anndata = anndata[~anndata.obs["doublet"]].copy()
-
-    anndata.obs['Sample'] = "_".join(csv_gz_path.split('/')[-1].split('_')[:-2])
-
-    # =========================================================
-    # Preprocessing
-    # =========================================================
-    sc.pp.filter_cells(anndata, min_genes=200)
-    # Gene filtering will be done after AnnData integration of multiple samples
+    solo_probs = solo.predict(soft=True)
+    adata.obs['singlet_probability'] = solo_probs['singlet']
+    adata.obs['singlet_probability'] = adata.obs['singlet_probability'].fillna(0)
     
-    # Marking mitochondrial and ribosomal genes
-    anndata.var["mt"] = anndata.var.index.str.startswith("MT-")
-    # This file is relatively small
-    ribo_url = "http://software.broadinstitute.org/gsea/msigdb/download_geneset.jsp?geneSetName=KEGG_RIBOSOME&fileType=txt"
-    ribo_genes = pd.read_table(ribo_url, skiprows=2, header=None)
-    anndata.var["ribo"] = anndata.var_names.isin(ribo_genes[0].values)
+    del vae, solo, vae_adata
+    gc.collect()
 
+    return adata
+
+def quality_assess(adata: AnnData, ribo_genes: pd.DataFrame) -> AnnData:
+    # Marking mitochondrial and ribosomal genes
+    adata.var["mt"] = adata.var.index.str.startswith("MT-")
+    adata.var["ribo"] = adata.var_names.isin(ribo_genes[0].values)
     # Generates QC metrics
     # qc_vars: List of categories that you want to make as a QC metrics (It must be set as a boolean list in AnnData.obs)
     sc.pp.calculate_qc_metrics(
-        anndata, qc_vars=["mt", "ribo"], percent_top=None, log1p=False, inplace=True
+        adata, qc_vars=["mt", "ribo"], percent_top=[20], log1p=True, inplace=True
     )
-    # Cytoplasmic RNA in dead cells leaks out, resulting in a higher proportion of remaining mitochondrial RNA
-    anndata = anndata[anndata.obs["pct_counts_mt"] < 20]
-    
-    return anndata
 
+    return adata
+
+# %% 
+anndata_list : list[AnnData] = []
+ribo_url = "http://software.broadinstitute.org/gsea/msigdb/download_geneset.jsp?geneSetName=KEGG_RIBOSOME&fileType=txt"
+ribo_genes = pd.read_table(ribo_url, skiprows=2, header=None)
+
+# Preprocessing each sample
 for file in os.listdir(base_directory):
-    anndata_list.append(sc_rna_seq_preprocessing(os.path.join(base_directory, file)))
+    loaded_adata = load_data(os.path.join(base_directory, file))
+    doublet_removed_adata = doublet_removal(loaded_adata)
+    quality_assessed_adata = quality_assess(doublet_removed_adata, ribo_genes)
 
+    anndata_list.append(quality_assessed_adata)
+# %% [markdown]
+# ### Visualizes sample quality metrics across multiple samples
+
+# %%
+anndata_obj_list: list[pd.DataFrame] = []
+for adata in anndata_list:
+    assert isinstance(adata.obs, pd.DataFrame)
+    anndata_obj_list.append(adata.obs)
+sample_quality = pd.concat(anndata_obj_list).sort_values("Sample")
+
+variables = ["singlet_probability", "pct_counts_mt", "n_genes_by_counts", "pct_counts_in_top_20_genes", "log1p_total_counts"]
+pretty_names = {
+    "singlet_probability": "Singlet Probability",
+    "pct_counts_mt": "Mitochondrial Fraction (%)",
+    "n_genes_by_counts": "Detected Genes",
+    "pct_counts_in_top_20_genes": "Library Complexity (Top 20%)",
+    "log1p_total_counts": "Sequencing Depth (Log1p UMI)",
+}
+
+qc_ridgeplot_dir = "qc_ridgeplots"
+os.makedirs(qc_ridgeplot_dir, exist_ok=True)
+
+for variable in variables:
+    # Initializes seaborn FacetGrid
+    sns_grid = sns.FacetGrid(
+            sample_quality, 
+            row="Sample", 
+            hue="Sample", 
+            aspect=15, 
+            height=0.6, 
+            palette="tab20",
+            sharex = True,
+        )
+    # Draw KDE (Kernel Density Estimation) plot
+    sns_grid.map(sns.kdeplot, variable, clip_on=False, fill=True, alpha=0.8, linewidth=1.5)
+    # Outlining the KDE plot with white line
+    sns_grid.map(sns.kdeplot, variable, clip_on=False, color="w", linewidth=2)
+    # Depicting a y axis
+    sns_grid.map(plt.axhline, y=0, linewidth=2, clip_on=False)
+    
+    # Write sample names on the left side of each KDE plot
+    def label(_, color, label):
+        kde_plot = plt.gca()
+        text = kde_plot.text(1, 0.2, label, fontweight="bold", color=color,
+                ha="right", va="center", transform=kde_plot.transAxes)
+        text.set_path_effects([
+            patheffects.withStroke(linewidth=3, foreground="w")
+        ])
+    sns_grid.map(label, variable)
+
+    # Allow subplots to overlap
+    sns_grid.figure.subplots_adjust(hspace=-0.4)
+    # Remove unnecessary subplot details
+    sns_grid.set_titles("")
+    # Remove y-axis ticks and labels
+    sns_grid.set(yticks=[], ylabel="")
+    # Remove spines (Outer box of each subplot)
+    sns_grid.despine(bottom=True, left=True)
+
+    for kde_plot in sns_grid.axes.flat:
+        kde_plot: Axes = kde_plot
+        # Draw median line (Red)
+        kde_plot.axvline(x=sample_quality[variable].median(), color='r', linestyle='-', alpha=0.5)
+        
+        # Special logic: Draw threshold line only for Singlet Probability
+        if variable == "singlet_probability":
+            kde_plot.axvline(x=0.6, color='blue', linestyle='--', linewidth=2)
+            kde_plot.text(0.6, 0.5, ' Cutoff (0.6)', color='blue', transform=kde_plot.get_xaxis_transform(), fontsize=8)
+        
+        # Set X-axis label
+        kde_plot.set_xlabel(pretty_names.get(variable, variable))
+
+    filename = os.path.join(qc_ridgeplot_dir, f"{variable}.svg")
+    plt.savefig(filename, format='svg', bbox_inches='tight')
+    plt.close()
+
+# %%
 integrated_anndata = sc.concat(anndata_list)
 # To save memory
 del anndata_list
@@ -112,40 +191,64 @@ gc.collect()
 # integrated_anndata.write_h5ad("combined.h5ad")
 # integrated_anndata = sc.read_h5ad("combined.h5ad")
 
-# Gene filtering after AnnData integration of multiple samples
+# %%
+# Cell and gene filtering
+sc.pp.filter_cells(integrated_anndata, min_genes=200)
 sc.pp.filter_genes(integrated_anndata, min_cells=100)
-assert isinstance(integrated_anndata.X, csr_matrix)
-integrated_anndata.layers['counts'] = integrated_anndata.X.copy()
+# Cytoplasmic RNA in dead cells leaks out, resulting in a higher proportion of remaining mitochondrial RNA
+integrated_anndata = integrated_anndata[integrated_anndata.obs["pct_counts_mt"] < 20].copy()
 
-# Normalization and Log Transformation
-sc.pp.normalize_total(integrated_anndata, target_sum=1e4)
-sc.pp.log1p(integrated_anndata)
-
+# %%
 # Setting up AnnData for SCVI model with covariates
 # In this case, we use AnnData layer "counts" instead of X
 # In this case, "Sample", 'pct_counts_mt', 'total_counts', 'pct_counts_ribo' are expected to contribute to the noises
 scvi.model.SCVI.setup_anndata(integrated_anndata, 
-                              layer = "counts",
                               categorical_covariate_keys=["Sample"],
                               continuous_covariate_keys=['pct_counts_mt', 'total_counts', 'pct_counts_ribo'])
 model = scvi.model.SCVI(integrated_anndata)
 model.train()
 
-# latent_representation: cell x latent_space_dimension
-integrated_anndata.obsm["X_scVI"] = model.get_latent_representation()
+# latent_representation: (cell, latent_space_dimension)
+integrated_anndata.obsm["x_scvi"] = model.get_latent_representation()
 # Denoised RNA expression
-integrated_anndata.obsm["X_normalized_scVI"] = model.get_normalized_expression(library__size = 1e4)
+integrated_anndata.obsm["scvi_normalized"] = model.get_normalized_expression(library_size = 1e4)
 
 # Uses pre-calculated SCVI latent representation for calculating similarity score and constructing neighborhood graph
 # Store settings in .uns["neighbors"] and connectivity matrices in .obsp
-sc.pp.neighbors(integrated_anndata, use_rep = "X_scVI")
+sc.pp.neighbors(integrated_anndata, use_rep = "x_scvi")
 # Embeds the neighborhood graph into 2D space using UMAP algorithm (optimized via SGD, Stochastic Gradient Descent)
 # You can change n_components to 3 for 3D UMAP
 sc.tl.umap(integrated_anndata, n_components=2)
 # Clustering cells using leiden algorithm, maximizes modularity which is defined based on its intergroup connectivity and expected (random) connectivity
 # High resolution value results in more clusters
-sc.tl.leiden(integrated_anndata, resolution=0.5, flavor="igraph", n_iterations=2, directed=False)
+sc.tl.leiden(integrated_anndata, resolution=1.0, flavor="igraph", n_iterations=2, directed=False)
 # Visualizes UMAP with leiden clusters and samples (Rendering a graph each)
 # String "umap" is added to the filename automatically
-sc.pl.umap(integrated_anndata, color=["leiden", "Sample"], projection = '2d',frameon = False, save = "_leiden_sample.png")
+#%%
+shuffled_adata = integrated_anndata[np.random.permutation(integrated_anndata.n_obs)]
+_, axs = plt.subplots(1, 2, figsize=(10, 5))
 
+sc.pl.umap(
+    shuffled_adata, 
+    color="leiden", 
+    projection = '2d',
+    ax=axs[0],             
+    legend_loc="on data",  
+    legend_fontoutline=2,  
+    frameon=False,         
+    title="Leiden Clustering", 
+    show=False             
+)
+sc.pl.umap(
+    shuffled_adata, 
+    color="Sample", 
+    projection = '2d',
+    ax=axs[1],      
+    frameon=False,
+    title="Sample Distribution",
+    show=False
+)
+
+plt.tight_layout()
+plt.savefig("umap_leiden_sample.svg", bbox_inches='tight', format='svg')
+plt.close()
