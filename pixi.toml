@@ -1,0 +1,24 @@
+[workspace]
+authors = ["sungjune222"]
+channels = ["conda-forge", "bioconda"]
+name = "scRNA-seq_pipeline"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+cuda = "13.1.1.*"
+python = "3.14.*"
+rpy2 = ">=3.6.4,<4"
+pixi-kernel = ">=0.7.1,<0.8"
+r-base = "4.4.*"
+r-seurat = ">=5.4.0,<6"
+bioconductor-singlecellexperiment = ">=1.28.0,<2"
+
+[pypi-dependencies]
+anndata2ri = ">=2.0, <3"
+igraph = ">=1.0.0, <2"
+python-dotenv = ">=1.2.1, <2"
+scvi-tools = ">=1.4.1, <2"
+torch = ">=2.9.1, <3"

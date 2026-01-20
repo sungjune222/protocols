@@ -1,4 +1,8 @@
 .env
-uv.lock
 *.png
 *.svg
+*.h5ad
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+raw_datasets
