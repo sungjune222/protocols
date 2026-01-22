@@ -2,7 +2,13 @@
 *.png
 *.svg
 *.h5ad
+*.csv
+*.tsv
+*.mtx
+*.rds
+*.txt
+*.gz
+*.tar
 # pixi environments
 .pixi/*
 !.pixi/config.toml
-raw_datasets

@@ -22,7 +22,10 @@ from matplotlib.axes import Axes
 
 # Loading .env
 load_dotenv()
-base_directory = os.getenv("PROCESSED_COUNT_MATRIX_LOCATION", ".")
+file_location = os.getenv("PROCESSED_COUNT_MATRIX_LOCATION", ".")
+file_name = "SCP1038.h5ad"
+file = os.path.join(file_location, file_name)
+
 DOUBLET_REMOVAL_VAE_BATCH_SIZE = int(
     os.getenv("DOUBLET_REMOVAL_VAE_BATCH_SIZE", "4000")
 )
@@ -39,16 +42,14 @@ warnings.filterwarnings("ignore", message="Tight layout not applied")
 # Setting seaborn global theme
 sns.set_theme(style="white", rc={"axes.facecolor": (0, 0, 0, 0)})
 
-# **If you are using NVIDIA GPU** this will adjust `float32_matmul_precision` to 'high' (TF32, default 'highest which is FP32), which accelerates matrix multiplication.
+# **If you are using NVIDIA GPU** this will adjust `float32_matmul_precision` to 'high' (TF32, default 'highest which is FP32),
+# which accelerates matrix multiplication.
 torch.set_float32_matmul_precision("high")
-scvi.settings.num_threads = 8
+scvi.settings.num_threads = 12
 
 DataLoader = dict(
-    # persistent_workers=True,  # Reuse data loader workers between epochs
     pin_memory=True,
-    # prefetch_factor=1,  # Number of batches loaded in advance by each worker
 )
-# trainer_kwargs = dict(precision="16-mixed")
 
 
 # %%  Preprocessing functions
@@ -99,7 +100,7 @@ def doublet_removal(adata: AnnData) -> AnnData:
         train_size=0.9,
         check_val_every_n_epoch=1,
     )
-    plot_validation_loss(vae, vae_adata.obs["id"].iloc[0] + "_validation_loss.svg")
+    plot_validation_loss(vae, vae_adata.obs["series"].iloc[0] + "_validation_loss.svg")
 
     # SOLO (Single-cell Doublet Detection via Variational Inference) identifies whether the cell is a singlet or a doublet
     # A decoder of VAE is not required because technical noise has already been accounted for and filtered out with the latent representation produced by the encoder
@@ -117,7 +118,7 @@ def doublet_removal(adata: AnnData) -> AnnData:
         check_val_every_n_epoch=1,
     )
     plot_validation_loss(
-        solo, vae_adata.obs["id"].iloc[0] + "_solo_validation_loss.svg"
+        solo, vae_adata.obs["series"].iloc[0] + "_solo_validation_loss.svg"
     )
     # 'soft' True returns probabilities for singlet and doublet
     solo_probs = solo.predict(soft=True)
@@ -177,25 +178,18 @@ def quality_assess(adata: AnnData, ribo_genes: pd.DataFrame) -> AnnData:
 
 
 # %%
-adata_list: list[AnnData] = []
 ribo_url = "http://software.broadinstitute.org/gsea/msigdb/download_geneset.jsp?geneSetName=KEGG_RIBOSOME&fileType=txt"
 ribo_genes = pd.read_table(ribo_url, skiprows=2, header=None)
 
 # Preprocessing each sample
-for file in os.listdir(base_directory):
-    loaded_adata = sc.read_h5ad(os.path.join(base_directory, file))
-    doublet_removed_adata = doublet_removal(loaded_adata)
-    quality_assessed_adata = quality_assess(doublet_removed_adata, ribo_genes)
-
-    adata_list.append(quality_assessed_adata)
+loaded_adata = sc.read_h5ad(file)
+doublet_removed_adata = doublet_removal(loaded_adata)
+processed_adata = quality_assess(doublet_removed_adata, ribo_genes)
 
 
 # %% Visualizes sample quality metrics across multiple samples
-adata_obj_list: list[pd.DataFrame] = []
-for adata in adata_list:
-    assert isinstance(adata.obs, pd.DataFrame)
-    adata_obj_list.append(adata.obs)
-sample_quality = pd.concat(adata_obj_list).sort_values("entity")
+assert isinstance(processed_adata.obs, pd.DataFrame)
+sample_quality = processed_adata.obs.sort_values("sample")
 
 variables = [
     "singlet_probability",
@@ -219,8 +213,8 @@ for variable in variables:
     # Initializes seaborn FacetGrid
     sns_grid = sns.FacetGrid(
         sample_quality,
-        row="entity",
-        hue="entity",
+        row="sample",
+        hue="sample",
         aspect=15,
         height=0.6,
         palette="tab20",
@@ -310,34 +304,30 @@ for variable in variables:
         kde_plot.set_xlabel(pretty_names.get(variable, variable))
 
     filename = os.path.join(
-        qc_ridgeplot_dir, f"{adata_list[0].obs['id'].iloc[0]}_{variable}.svg"
+        qc_ridgeplot_dir, f"{processed_adata[0].obs['series'].iloc[0]}_{variable}.svg"
     )
     plt.savefig(filename, format="svg", bbox_inches="tight")
     plt.close()
 
 # %%
-integrated_adata = sc.concat(adata_list)
-# To save memory
-del adata_list
-gc.collect()
 
 # Cell and gene filtering
-sc.pp.filter_cells(integrated_adata, min_genes=200)
-sc.pp.filter_genes(integrated_adata, min_cells=100)
+sc.pp.filter_cells(processed_adata, min_genes=200)
+sc.pp.filter_genes(processed_adata, min_cells=100)
 # Cytoplasmic RNA in dead cells leaks out, resulting in a higher proportion of remaining mitochondrial RNA
-integrated_adata = integrated_adata[integrated_adata.obs["pct_counts_mt"] < 20].copy()
+processed_adata = processed_adata[processed_adata.obs["pct_counts_mt"] < 20].copy()
 
 # %%
 # Setting up AnnData for SCVI model with batch effects
 # In this case, we use AnnData layer "counts" instead of X
 # In this case, "Sample", 'pct_counts_mt', 'total_counts', 'pct_counts_ribo' are expected to contribute to the noises
 scvi.model.SCVI.setup_anndata(
-    integrated_adata,
+    processed_adata,
     # The primary batch info
-    batch_key="entity",
+    batch_key="sample",
     continuous_covariate_keys=["pct_counts_mt", "total_counts", "pct_counts_ribo"],
 )
-model = scvi.model.SCVI(integrated_adata)
+model = scvi.model.SCVI(processed_adata)
 model.train(
     accelerator="gpu",
     batch_size=SINGLE_CELL_VAE_BATCH_SIZE,
@@ -347,44 +337,43 @@ model.train(
     check_val_every_n_epoch=1,
 )
 plot_validation_loss(
-    model, integrated_adata.obs["id"].iloc[0] + "_integrated_validation_loss.svg"
+    model, processed_adata.obs["series"].iloc[0] + "_integrated_validation_loss.svg"
 )
 
 # latent_representation: (cell, latent_space_dimension)
-integrated_adata.obsm["X_scvi"] = model.get_latent_representation()
-# Denoised RNA expression
-integrated_adata.obsm["scvi_normalized"] = model.get_normalized_expression(
-    library_size=1e4
-)
-
-# Uses pre-calculated SCVI latent representation for calculating similarity score and constructing neighborhood graph
-# Store settings in .uns["neighbors"] and connectivity matrices in .obsp
-sc.pp.neighbors(integrated_adata, use_rep="X_scvi")
-# Embeds the neighborhood graph into 2D space using UMAP algorithm (optimized via SGD, Stochastic Gradient Descent)
-# You can change n_components to 3 for 3D UMAP
-sc.tl.umap(integrated_adata, n_components=2)
+processed_adata.obsm["X_scvi"] = model.get_latent_representation()
+del model
+gc.collect()
 
 processed_directory = os.getenv("PROCESSED_DATA_LOCATION", ".")
-integrated_adata.write_h5ad(
-    os.path.join(processed_directory, integrated_adata.obs["id"].iloc[0] + ".h5ad")
+processed_adata.write_h5ad(
+    os.path.join(processed_directory, processed_adata.obs["series"].iloc[0] + ".h5ad")
 )
 
 # %% Visualizes UMAP with leiden clusters and samples (Rendering a graph each)
 
+# Uses pre-calculated SCVI latent representation for calculating similarity score and constructing neighborhood graph
+# Store settings in .uns["neighbors"] and connectivity matrices in .obsp
+sc.pp.neighbors(processed_adata, n_neighbors=10, use_rep="X_scvi")
+# Embeds the neighborhood graph into 2D space using UMAP algorithm (optimized via SGD, Stochastic Gradient Descent)
+# You can change n_components to 3 for 3D UMAP
+sc.tl.umap(processed_adata, n_components=2, min_dist=0.15)
+
+# If the clusters appear too clumped or merged, try decreasing n_neighbors and min_dist
+
 # Clustering cells using leiden algorithm, maximizes modularity which is defined based on its intergroup connectivity and expected (random) connectivity
 # High resolution value results in more clusters
 sc.tl.leiden(
-    integrated_adata, resolution=1.5, flavor="igraph", n_iterations=-1, directed=False
+    processed_adata, resolution=1.5, flavor="igraph", n_iterations=-1, directed=False
 )
 
-if not isinstance(integrated_adata.obs, pd.DataFrame):
-    raise TypeError("integrated_adata.obs is not a pandas DataFrame")
+if not isinstance(processed_adata.obs, pd.DataFrame):
+    raise TypeError("processed_adata.obs is not a pandas DataFrame")
+idx = np.random.permutation(processed_adata.n_obs)
+plot_adata = AnnData(obs=processed_adata.obs.iloc[idx].copy())
+plot_adata.obsm["X_umap"] = processed_adata.obsm["X_umap"][idx].copy()
 
-idx = np.random.permutation(integrated_adata.n_obs)
-plot_adata = AnnData(obs=integrated_adata.obs.iloc[idx].copy())
-plot_adata.obsm["X_umap"] = integrated_adata.obsm["X_umap"][idx].copy()
-
-fig, axs = plt.subplots(1, 3, figsize=(30, 12))
+fig, axs = plt.subplots(1, 4, figsize=(40, 12))
 DOT_SIZE = 7
 
 sc.pl.umap(
@@ -403,7 +392,7 @@ axs[0].set_title("Leiden Clustering", fontweight="bold", fontsize=24)
 
 sc.pl.umap(
     plot_adata,
-    color="entity",
+    color="sample",
     projection="2d",
     ax=axs[1],
     legend_loc="best",
@@ -413,23 +402,35 @@ sc.pl.umap(
 )
 axs[1].set_title("Sample Distribution", fontweight="bold", fontsize=24)
 
-# If you want to highlight a specific cell type, uncomment the following lines and modify the cell type name
-# cell_types = plot_adata.obs["celltype"].unique()
-# custom_palette = {ct: "lightgray" for ct in cell_types}
-# custom_palette["EGC"] = "#FF0000"
-
 sc.pl.umap(
     plot_adata,
     color="celltype",
     projection="2d",
     ax=axs[2],
-    # palette=custom_palette,
     legend_loc="best",
     size=DOT_SIZE,
     frameon=False,
     show=False,
 )
 axs[2].set_title("Cell Type Distribution", fontweight="bold", fontsize=24)
+
+# Highlighting a specific cell type
+cell_types = plot_adata.obs["celltype"].unique()
+custom_palette = {ct: "lightgray" for ct in cell_types}
+custom_palette["Enteric_Glia"] = "#FF0000"
+
+sc.pl.umap(
+    plot_adata,
+    color="celltype",
+    projection="2d",
+    ax=axs[3],
+    palette=custom_palette,
+    legend_loc="best",
+    size=DOT_SIZE,
+    frameon=False,
+    show=False,
+)
+axs[3].set_title("Enteric Glia Distribution", fontweight="bold", fontsize=24)
 
 for ax in axs:
     legend = ax.get_legend()
@@ -440,6 +441,6 @@ umap_dir = "umap"
 os.makedirs(umap_dir, exist_ok=True)
 
 plt.savefig(
-    os.path.join(umap_dir, plot_adata.obs["id"].iloc[0] + "_umap.svg"), format="svg"
+    os.path.join(umap_dir, plot_adata.obs["series"].iloc[0] + "_umap.svg"), format="svg"
 )
 plt.close()
