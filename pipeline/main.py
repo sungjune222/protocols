@@ -7,7 +7,7 @@ import scanpy as sc
 import scvi
 from anndata import AnnData
 from pipeline.utils import plot
-from pipeline.utils.env import find_env, find_env_dir
+from pipeline.utils.env import find_env_dir
 from pipeline.config.constants import (
     DOUBLET_REMOVAL_VAE_BATCH_SIZE,
     DOUBLET_REMOVAL_SOLO_BATCH_SIZE,
@@ -16,9 +16,9 @@ from pipeline.config.constants import (
 from pipeline.config.machine_learning import DataLoader
 
 # Loading .env
-file_location = find_env("PROCESSED_COUNT_MATRIX_LOCATION")
+h5ad_count_matrix_location = find_env_dir("H5AD_COUNT_MATRIX_LOCATION")
 file_name = "SCP1038.h5ad"
-file = os.path.join(file_location, file_name)
+file = os.path.join(h5ad_count_matrix_location, file_name)
 
 
 # %%  Preprocessing functions
@@ -163,9 +163,11 @@ processed_adata.obsm["X_scvi"] = model.get_latent_representation()
 del model
 gc.collect()
 
-processed_directory = find_env_dir("PROCESSED_DATA_LOCATION")
+processed_h5ad_location = find_env_dir("PROCESSED_H5AD_LOCATION")
 processed_adata.write_h5ad(
-    os.path.join(processed_directory, processed_adata.obs["series"].iloc[0] + ".h5ad")
+    os.path.join(
+        processed_h5ad_location, processed_adata.obs["series"].iloc[0] + ".h5ad"
+    )
 )
 
 # %% Visualizes UMAP with leiden clusters and samples (Rendering a graph each)
@@ -182,7 +184,15 @@ sc.tl.umap(processed_adata, n_components=2, min_dist=0.15)
 # Clustering cells using leiden algorithm, maximizes modularity which is defined based on its intergroup connectivity and expected (random) connectivity
 # High resolution value results in more clusters
 sc.tl.leiden(
-    processed_adata, resolution=1.5, flavor="igraph", n_iterations=-1, directed=False
+    processed_adata, resolution=1.0, flavor="igraph", n_iterations=-1, directed=False
 )
 
-plot.plot_umap(processed_adata)
+clustered_data_location = find_env_dir("CLUSTERED_DATA_LOCATION")
+processed_adata.write_h5ad(
+    os.path.join(
+        clustered_data_location,
+        processed_adata.obs["series"].iloc[0] + "_clustered.h5ad",
+    )
+)
+
+plot.plot_umap(processed_adata, has_celltype=True, highlight_cells=["Enteric_Glia"])

@@ -14,10 +14,13 @@ import scvi
 import seaborn as sns
 import warnings
 from anndata import AnnData
+from scipy.sparse import spmatrix
+from typing import List, Dict, Any, Optional
 from pipeline.config.directory import (
-    VALIDATION_LOSS_PLOTS_DIR,
+    DOTPLOTS_DIR,
     QC_RIDGEPLOTS_DIR,
     UMAP_PLOTS_DIR,
+    VALIDATION_LOSS_PLOTS_DIR,
 )
 
 # Setting seaborn global theme
@@ -186,7 +189,17 @@ def plot_qc(adata: AnnData) -> None:
         plt.close()
 
 
-def plot_umap(adata: AnnData) -> None:
+# If celltype information is already annotated in adata.obs["celltype"], set has_celltype=True to visualize
+# If you want to highlight specific cell types, provide their names in highlight_cells list
+# highlight_cells only work when has_celltype=True
+# additional_config can be used to provide extra plotting configurations
+def plot_umap(
+    adata: AnnData,
+    has_celltype: bool = False,
+    highlight_cells: Optional[List[str]] = None,
+    additional_config: Optional[List[Dict[str, Any]]] = None,
+    dot_size: int = 7,
+) -> None:
     os.makedirs(UMAP_PLOTS_DIR, exist_ok=True)
 
     assert isinstance(adata.obs, pd.DataFrame)
@@ -196,14 +209,6 @@ def plot_umap(adata: AnnData) -> None:
     plot_adata.obsm["X_umap"] = adata.obsm["X_umap"][idx].copy()
 
     series_name = plot_adata.obs["series"].iloc[0]
-    DOT_SIZE = 7
-
-    cell_types = plot_adata.obs["celltype"].unique()
-    custom_palette = {ct: "lightgray" for ct in cell_types}
-    if "Enteric_Glia" in custom_palette:
-        custom_palette["Enteric_Glia"] = "#FF0000"
-    else:
-        print("Warning: 'Enteric_Glia' not found in cell types.")
 
     plot_configs = [
         {
@@ -220,21 +225,40 @@ def plot_umap(adata: AnnData) -> None:
             "legend_loc": "best",
             "palette": None,
         },
-        {
-            "color": "celltype",
-            "title": "Cell Type Distribution",
-            "suffix": "_Cell_Type_Distribution",
-            "legend_loc": "best",
-            "palette": None,
-        },
-        {
-            "color": "celltype",
-            "title": "Enteric Glia Distribution",
-            "suffix": "_Enteric_Glia_Highlight",
-            "legend_loc": "best",
-            "palette": custom_palette,
-        },
     ]
+
+    if has_celltype:
+        plot_configs.append(
+            {
+                "color": "celltype",
+                "title": "Cell Type Distribution",
+                "suffix": "_Cell_Type_Distribution",
+                "legend_loc": "best",
+                "palette": None,
+            }
+        )
+    if has_celltype and highlight_cells is not None:
+        cell_types = plot_adata.obs["celltype"].unique()
+
+        for cell in highlight_cells:
+            custom_palette = {ct: "lightgray" for ct in cell_types}
+            if cell in custom_palette:
+                custom_palette[cell] = "#FF0000"
+            else:
+                print(f"Warning: '{cell}' not found in cell types.")
+
+            plot_configs.append(
+                {
+                    "color": "celltype",
+                    "title": f"{cell} Distribution",
+                    "suffix": f"_{cell}_Highlight",
+                    "legend_loc": "best",
+                    "palette": custom_palette,
+                },
+            )
+
+    if additional_config is not None:
+        plot_configs.extend(additional_config)
 
     for config in plot_configs:
         fig, ax = plt.subplots(figsize=(16, 10))
@@ -247,7 +271,7 @@ def plot_umap(adata: AnnData) -> None:
             palette=config["palette"],
             legend_loc=config["legend_loc"],
             legend_fontoutline=2,
-            size=DOT_SIZE,
+            size=dot_size,
             frameon=False,
             show=False,
         )
@@ -257,8 +281,70 @@ def plot_umap(adata: AnnData) -> None:
         if legend:
             legend.set_frame_on(False)
 
-        filename = f"{series_name}_umap{config['suffix']}.svg"
+        filename = f"{series_name}_umap_{config['suffix']}.svg"
         save_path = os.path.join(UMAP_PLOTS_DIR, filename)
         plt.savefig(save_path, format="svg", bbox_inches="tight")
 
         plt.close(fig)
+
+
+def plot_dotplot(adata: AnnData, target_genes_dict: Dict[str, List[str]]) -> None:
+    os.makedirs(DOTPLOTS_DIR, exist_ok=True)
+    series_name = adata.obs["series"].iloc[0]
+
+    all_target_genes = []
+    for genes in target_genes_dict.values():
+        all_target_genes.extend(genes)
+
+    if len(all_target_genes) != len(set(all_target_genes)):
+        seen = set()
+        duplicates = set()
+        for gene in all_target_genes:
+            if gene in seen:
+                duplicates.add(gene)
+            seen.add(gene)
+        raise ValueError(
+            f"Duplicate genes found in target_genes_dict: {list(duplicates)}. Please ensure each gene appears only once."
+        )
+
+    missing_genes = [gene for gene in all_target_genes if gene not in adata.var_names]
+    if missing_genes:
+        raise ValueError(f"Such genes are missing in the data: {missing_genes}")
+
+    if "total_counts" in adata.obs:
+        library_size = adata.obs["total_counts"].to_numpy()
+    else:
+        raise ValueError(
+            "total_counts not found in adata.obs, quality check did not run properly"
+        )
+
+    target_gene_expression = adata[:, all_target_genes].X
+    if isinstance(target_gene_expression, spmatrix):
+        target_gene_expression = target_gene_expression.toarray()  # type: ignore
+    else:
+        target_gene_expression = np.asarray(target_gene_expression)
+
+    assert isinstance(adata.obs, pd.DataFrame)
+    core_adata = AnnData(
+        X=target_gene_expression,
+        obs=adata.obs[["leiden"]].copy(),
+        var=pd.DataFrame(index=all_target_genes),
+    )
+
+    library_size = np.where(library_size == 0, 1, library_size)
+    core_adata.X = (core_adata.X / library_size[:, np.newaxis]) * 1e4
+    sc.pp.log1p(core_adata)
+
+    sc.pl.dotplot(
+        core_adata,
+        var_names=target_genes_dict,
+        groupby="leiden",
+        standard_scale="var",  # None: Absolute expression values, "var": Relative to gene
+        show=False,
+        use_raw=False,
+    )
+
+    suffix = "_".join(target_genes_dict.keys())
+    filename = f"{series_name}_{suffix}_dotplot.svg"
+    plt.savefig(os.path.join(DOTPLOTS_DIR, filename), format="svg", bbox_inches="tight")
+    plt.close()
