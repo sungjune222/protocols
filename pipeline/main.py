@@ -6,18 +6,22 @@ import pandas as pd
 import scanpy as sc
 import scvi
 from anndata import AnnData
+from scipy.sparse import csr_matrix
+from pydeseq2.dds import DeseqDataSet
+from pydeseq2.ds import DeseqStats
 from pipeline.utils import plot
 from pipeline.utils.env import find_env_dir
 from pipeline.config.constants import (
     DOUBLET_REMOVAL_VAE_BATCH_SIZE,
     DOUBLET_REMOVAL_SOLO_BATCH_SIZE,
     SINGLE_CELL_VAE_BATCH_SIZE,
+    CPU_CORE_COUNT,
 )
 from pipeline.config.machine_learning import DataLoader
 
 # Loading .env
 h5ad_count_matrix_location = find_env_dir("H5AD_COUNT_MATRIX_LOCATION")
-file_name = "SCP1038.h5ad"
+file_name = "GSE232703_duodenum.h5ad"
 file = os.path.join(h5ad_count_matrix_location, file_name)
 
 
@@ -122,31 +126,46 @@ ribo_url = "http://software.broadinstitute.org/gsea/msigdb/download_geneset.jsp?
 ribo_genes = pd.read_table(ribo_url, skiprows=2, header=None)
 
 # Preprocessing each sample
+print("Loading data...")
 loaded_adata = sc.read_h5ad(file)
+
+print("Removing doublets...")
 doublet_removed_adata = doublet_removal(loaded_adata)
-processed_adata = quality_assess(doublet_removed_adata, ribo_genes)
 
-plot.plot_qc(processed_adata)
-
-# %%
-
+print("Assessing quality...")
+quality_assessed_adata = quality_assess(doublet_removed_adata, ribo_genes)
 # Cell and gene filtering
-sc.pp.filter_cells(processed_adata, min_genes=200)
-sc.pp.filter_genes(processed_adata, min_cells=100)
-# Cytoplasmic RNA in dead cells leaks out, resulting in a higher proportion of remaining mitochondrial RNA
-processed_adata = processed_adata[processed_adata.obs["pct_counts_mt"] < 20].copy()
+sc.pp.filter_cells(quality_assessed_adata, min_genes=200)
+sc.pp.filter_genes(quality_assessed_adata, min_cells=10)
+# Filtered cells and genes necessitate re-calculation of QC metrics
+quality_assessed_adata = quality_assess(quality_assessed_adata, ribo_genes)
 
-# %%
-# Setting up AnnData for SCVI model with batch effects
-# In this case, we use AnnData layer "counts" instead of X
-# In this case, "Sample", 'pct_counts_mt', 'total_counts', 'pct_counts_ribo' are expected to contribute to the noises
-scvi.model.SCVI.setup_anndata(
-    processed_adata,
-    # The primary batch info
-    batch_key="sample",
-    continuous_covariate_keys=["pct_counts_mt", "total_counts", "pct_counts_ribo"],
+plot.plot_qc(quality_assessed_adata)
+series_name = quality_assessed_adata.obs["series"].iloc[0]
+
+# Cytoplasmic RNA in dead cells leaks out, resulting in a higher proportion of remaining mitochondrial RNA
+quality_assessed_adata = quality_assessed_adata[
+    (quality_assessed_adata.obs["pct_counts_mt"] < 15)
+    & (quality_assessed_adata.obs["singlet_probability"] > 0.6)
+].copy()
+
+filtered_adata = quality_assessed_adata
+gc.collect()
+
+filtered_count_matrix_location = find_env_dir("FILTERED_COUNT_MATRIX_LOCATION")
+filtered_adata.write_h5ad(
+    os.path.join(filtered_count_matrix_location, series_name + ".h5ad")
 )
-model = scvi.model.SCVI(processed_adata)
+
+# %% Producing latent representation of cells using scVI
+print("Producing latent representation of cells using scVI...")
+# Setting up AnnData for scVI model with batch effects
+scvi.model.SCVI.setup_anndata(
+    filtered_adata,
+    # The primary batch info
+    batch_key="batch",
+)
+model = scvi.model.SCVI(filtered_adata)
 model.train(
     accelerator="gpu",
     batch_size=SINGLE_CELL_VAE_BATCH_SIZE,
@@ -154,45 +173,128 @@ model.train(
     train_size=0.9,
     check_val_every_n_epoch=1,
 )
-plot.plot_validation_loss(
-    model, processed_adata.obs["series"].iloc[0] + "_integrated_validation_loss.svg"
-)
+plot.plot_validation_loss(model, series_name + "_model_validation_loss.svg")
 
 # latent_representation: (cell, latent_space_dimension)
-processed_adata.obsm["X_scvi"] = model.get_latent_representation()
-del model
-gc.collect()
+filtered_adata.obsm["X_scvi"] = model.get_latent_representation()
 
-processed_h5ad_location = find_env_dir("PROCESSED_H5AD_LOCATION")
-processed_adata.write_h5ad(
-    os.path.join(
-        processed_h5ad_location, processed_adata.obs["series"].iloc[0] + ".h5ad"
-    )
+scvi_model_location = find_env_dir("SCVI_MODEL_LOCATION")
+model.save(
+    os.path.join(scvi_model_location, series_name), overwrite=True, save_anndata=True
 )
 
-# %% Visualizes UMAP with leiden clusters and samples (Rendering a graph each)
-
-# Uses pre-calculated SCVI latent representation for calculating similarity score and constructing neighborhood graph
+# %% Clustering and DE analysis
+# Uses pre-calculated scVI latent representation for calculating similarity score and constructing neighborhood graph
 # Store settings in .uns["neighbors"] and connectivity matrices in .obsp
-sc.pp.neighbors(processed_adata, n_neighbors=10, use_rep="X_scvi")
+print("Constructing neighborhood graph...")
+sc.pp.neighbors(filtered_adata, n_neighbors=10, use_rep="X_scvi")
 # Embeds the neighborhood graph into 2D space using UMAP algorithm (optimized via SGD, Stochastic Gradient Descent)
 # You can change n_components to 3 for 3D UMAP
-sc.tl.umap(processed_adata, n_components=2, min_dist=0.15)
-
+print("Calculating UMAP...")
+sc.tl.umap(filtered_adata, n_components=2, min_dist=0.2)
 # If the clusters appear too clumped or merged, try decreasing n_neighbors and min_dist
 
 # Clustering cells using leiden algorithm, maximizes modularity which is defined based on its intergroup connectivity and expected (random) connectivity
 # High resolution value results in more clusters
+print("Clustering with Leiden algorithm...")
 sc.tl.leiden(
-    processed_adata, resolution=1.0, flavor="igraph", n_iterations=-1, directed=False
+    filtered_adata, resolution=1.0, flavor="igraph", n_iterations=-1, directed=False
 )
+plot.plot_umap(filtered_adata)
+
+# Differential expression analysis is not performed on scVI denoised data because of imputation artifacts
+# Instead, pseudobulk differential expression analysis using DESeq2 is performed
+print("Differential expression analysis...")
 
 clustered_data_location = find_env_dir("CLUSTERED_DATA_LOCATION")
-processed_adata.write_h5ad(
+de_analysis_location = find_env_dir("DE_ANALYSIS_LOCATION")
+
+filtered_adata.write_h5ad(
     os.path.join(
         clustered_data_location,
-        processed_adata.obs["series"].iloc[0] + "_clustered.h5ad",
+        series_name + "_clustered.h5ad",
     )
 )
 
-plot.plot_umap(processed_adata, has_celltype=True, highlight_cells=["Enteric_Glia"])
+
+def pseudobulk_deseq2(adata: AnnData, cluster_key="leiden"):
+    clusters = adata.obs[cluster_key].unique().tolist()
+    samples = adata.obs["sample"].unique().tolist()
+
+    results = []
+    for cluster in clusters:
+        rows, meta, idx = [], [], []
+
+        for sample in samples:
+            mask_sample = adata.obs["sample"] == sample
+            mask_sample_cluster = mask_sample & (adata.obs[cluster_key] == cluster)
+            mask_sample_rest = mask_sample & (adata.obs[cluster_key] != cluster)
+
+            n_cells_cluster = int(mask_sample_cluster.sum())
+            n_cells_rest = int(mask_sample_rest.sum())
+
+            if n_cells_cluster < 50 or n_cells_rest < 50:
+                continue
+
+            sample_cluster_adata = adata[mask_sample_cluster]
+            assert isinstance(sample_cluster_adata.X, csr_matrix)
+            rows.append(np.asarray(sample_cluster_adata.X.sum(axis=0)).ravel())
+            meta.append(
+                {
+                    "sample": sample,
+                    "group": "cluster",
+                    "n_cells": n_cells_cluster,
+                    "batch": sample,
+                }
+            )
+            idx.append(f"{sample}_{cluster}")
+
+            sample_rest_adata = adata[mask_sample_rest]
+            assert isinstance(sample_rest_adata.X, csr_matrix)
+            rows.append(np.asarray(sample_rest_adata.X.sum(axis=0)).ravel())
+            meta.append(
+                {
+                    "sample": sample,
+                    "group": "rest",
+                    "n_cells": n_cells_rest,
+                    "batch": sample,
+                }
+            )
+            idx.append(f"{sample}_{cluster}_rest")
+
+        if len(rows) < 4:
+            print("Not enough samples for cluster ", cluster)
+            continue
+        counts = pd.DataFrame(rows, index=idx, columns=adata.var_names)
+        meta = pd.DataFrame(meta, index=idx)
+        print(counts)
+        print(meta)
+
+        dds = DeseqDataSet(
+            counts=counts,
+            metadata=meta,
+            design="~batch + group",
+            refit_cooks=True,
+            n_cpus=CPU_CORE_COUNT,
+        )
+        sc.pp.filter_genes(dds, min_cells=1)
+        dds.deseq2()
+
+        ds = DeseqStats(
+            dds, contrast=["group", "cluster", "rest"], n_cpus=CPU_CORE_COUNT
+        )
+        ds.summary()
+
+        res = ds.results_df.copy()
+        res["cluster"] = cluster
+        res["contrast"] = "rest"
+        res["cluster_key"] = cluster_key
+        res = res.reset_index().rename(columns={"index": "gene"})
+
+        results.append(res)
+
+    results = pd.concat(results, axis=0, ignore_index=True)
+    results.to_csv(os.path.join(de_analysis_location, series_name + "_deseq2.csv"))
+
+
+pseudobulk_deseq2(filtered_adata)

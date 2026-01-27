@@ -1,10 +1,9 @@
 from dotenv import load_dotenv
 import os
 
-load_dotenv(override=True)
-
 
 def find_env(var_name: str) -> str:
+    load_dotenv()
     value = os.getenv(var_name)
     if value is None:
         raise KeyError(f"Required environment variable '{var_name}' is not set.")

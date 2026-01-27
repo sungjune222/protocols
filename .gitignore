@@ -7,9 +7,11 @@
 *.mtx
 *.rds
 *.txt
+*.pt
 *.gz
 *.tar
 __pycache__/
+*.swp
 # pixi environments
 .pixi/*
 !.pixi/config.toml

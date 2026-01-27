@@ -14,17 +14,9 @@ import scvi
 import seaborn as sns
 import warnings
 from anndata import AnnData
-from scipy.sparse import spmatrix
+from scipy.sparse import issparse, csr_matrix
 from typing import List, Dict, Any, Optional
-from pipeline.config.directory import (
-    DOTPLOTS_DIR,
-    QC_RIDGEPLOTS_DIR,
-    UMAP_PLOTS_DIR,
-    VALIDATION_LOSS_PLOTS_DIR,
-)
-
-# Setting seaborn global theme
-sns.set_theme(style="white", rc={"axes.facecolor": (0, 0, 0, 0)})
+from pipeline.utils.env import find_env_dir
 
 warnings.filterwarnings("ignore", message="Tight layout not applied")
 
@@ -33,7 +25,7 @@ warnings.filterwarnings("ignore", message="Tight layout not applied")
 def plot_validation_loss(
     model: scvi.model.SCVI | scvi.external.SOLO, filename: str
 ) -> None:
-    os.makedirs(VALIDATION_LOSS_PLOTS_DIR, exist_ok=True)
+    validation_loss_plots_dir = find_env_dir("VALIDATION_LOSS_PLOTS_DIR")
 
     if model.history is None:
         raise ValueError("Model history is not available.")
@@ -56,7 +48,7 @@ def plot_validation_loss(
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(
-        os.path.join(VALIDATION_LOSS_PLOTS_DIR, filename),
+        os.path.join(validation_loss_plots_dir, filename),
         format="svg",
         bbox_inches="tight",
     )
@@ -65,7 +57,13 @@ def plot_validation_loss(
 
 # %% Visualizes sample quality metrics across multiple samples
 def plot_qc(adata: AnnData) -> None:
-    os.makedirs(QC_RIDGEPLOTS_DIR, exist_ok=True)
+    qc_ridgeplots_dir = find_env_dir("QC_RIDGEPLOTS_DIR")
+    series_name = adata[0].obs["series"].iloc[0]
+    qc_ridgeplots_dir = os.path.join(qc_ridgeplots_dir, series_name)
+    os.makedirs(
+        qc_ridgeplots_dir,
+        exist_ok=True,
+    )
 
     assert isinstance(adata.obs, pd.DataFrame)
     sample_quality = adata.obs.sort_values("sample")
@@ -84,7 +82,9 @@ def plot_qc(adata: AnnData) -> None:
         "pct_counts_in_top_20_genes": "Library Complexity (Top 20%)",
         "log1p_total_counts": "Sequencing Depth (Log1p UMI)",
     }
-    series_name = adata[0].obs["series"].iloc[0]
+
+    # Setting seaborn global theme
+    sns.set_theme(style="white", rc={"axes.facecolor": (0, 0, 0, 0)})
 
     for variable in variables:
         # Initializes seaborn FacetGrid
@@ -182,11 +182,12 @@ def plot_qc(adata: AnnData) -> None:
             kde_plot.set_xlabel(pretty_names.get(variable, variable))
 
         filename = os.path.join(
-            QC_RIDGEPLOTS_DIR,
-            f"{series_name}_{variable}.svg",
+            qc_ridgeplots_dir,
+            f"{variable}.svg",
         )
         plt.savefig(filename, format="svg", bbox_inches="tight")
         plt.close()
+    sns.reset_defaults()
 
 
 # If celltype information is already annotated in adata.obs["celltype"], set has_celltype=True to visualize
@@ -200,28 +201,29 @@ def plot_umap(
     additional_config: Optional[List[Dict[str, Any]]] = None,
     dot_size: int = 7,
 ) -> None:
-    os.makedirs(UMAP_PLOTS_DIR, exist_ok=True)
-
+    umap_plots_dir = find_env_dir("UMAP_PLOTS_DIR")
+    series_name = adata[0].obs["series"].iloc[0]
+    umap_plots_dir = os.path.join(umap_plots_dir, series_name)
+    os.makedirs(
+        umap_plots_dir,
+        exist_ok=True,
+    )
     assert isinstance(adata.obs, pd.DataFrame)
 
     idx = np.random.permutation(adata.n_obs)
     plot_adata = AnnData(obs=adata.obs.iloc[idx].copy())
     plot_adata.obsm["X_umap"] = adata.obsm["X_umap"][idx].copy()
 
-    series_name = plot_adata.obs["series"].iloc[0]
-
     plot_configs = [
         {
             "color": "leiden",
             "title": "Leiden Clustering",
-            "suffix": "_Leiden_Clustering",
             "legend_loc": "on data",
             "palette": None,
         },
         {
             "color": "sample",
             "title": "Sample Distribution",
-            "suffix": "_Sample_Distribution",
             "legend_loc": "best",
             "palette": None,
         },
@@ -232,7 +234,6 @@ def plot_umap(
             {
                 "color": "celltype",
                 "title": "Cell Type Distribution",
-                "suffix": "_Cell_Type_Distribution",
                 "legend_loc": "best",
                 "palette": None,
             }
@@ -246,12 +247,12 @@ def plot_umap(
                 custom_palette[cell] = "#FF0000"
             else:
                 print(f"Warning: '{cell}' not found in cell types.")
+                return
 
             plot_configs.append(
                 {
                     "color": "celltype",
                     "title": f"{cell} Distribution",
-                    "suffix": f"_{cell}_Highlight",
                     "legend_loc": "best",
                     "palette": custom_palette,
                 },
@@ -281,16 +282,22 @@ def plot_umap(
         if legend:
             legend.set_frame_on(False)
 
-        filename = f"{series_name}_umap_{config['suffix']}.svg"
-        save_path = os.path.join(UMAP_PLOTS_DIR, filename)
+        filename = f"umap_{config['title']}.svg"
+        save_path = os.path.join(umap_plots_dir, filename)
         plt.savefig(save_path, format="svg", bbox_inches="tight")
 
         plt.close(fig)
 
 
 def plot_dotplot(adata: AnnData, target_genes_dict: Dict[str, List[str]]) -> None:
-    os.makedirs(DOTPLOTS_DIR, exist_ok=True)
+    dotplots_dir = find_env_dir("DOTPLOTS_DIR")
     series_name = adata.obs["series"].iloc[0]
+    suffix = "_".join(target_genes_dict.keys())
+    dotplots_dir = os.path.join(dotplots_dir, series_name + "_" + suffix)
+    os.makedirs(
+        dotplots_dir,
+        exist_ok=True,
+    )
 
     all_target_genes = []
     for genes in target_genes_dict.values():
@@ -311,16 +318,15 @@ def plot_dotplot(adata: AnnData, target_genes_dict: Dict[str, List[str]]) -> Non
     if missing_genes:
         raise ValueError(f"Such genes are missing in the data: {missing_genes}")
 
-    if "total_counts" in adata.obs:
-        library_size = adata.obs["total_counts"].to_numpy()
+    assert isinstance(adata.X, csr_matrix)
+    if issparse(adata.X):
+        library_size = np.array(adata.X.sum(axis=1)).ravel()
     else:
-        raise ValueError(
-            "total_counts not found in adata.obs, quality check did not run properly"
-        )
+        library_size = adata.X.sum(axis=1)
 
     target_gene_expression = adata[:, all_target_genes].X
-    if isinstance(target_gene_expression, spmatrix):
-        target_gene_expression = target_gene_expression.toarray()  # type: ignore
+    if isinstance(target_gene_expression, csr_matrix):
+        target_gene_expression = target_gene_expression.toarray()
     else:
         target_gene_expression = np.asarray(target_gene_expression)
 
@@ -342,9 +348,56 @@ def plot_dotplot(adata: AnnData, target_genes_dict: Dict[str, List[str]]) -> Non
         standard_scale="var",  # None: Absolute expression values, "var": Relative to gene
         show=False,
         use_raw=False,
+        var_group_rotation=0,
+    )
+
+    filename = "Var_dotplot.svg"
+    plt.savefig(os.path.join(dotplots_dir, filename), format="svg", bbox_inches="tight")
+
+    sc.pl.dotplot(
+        core_adata,
+        var_names=target_genes_dict,
+        groupby="leiden",
+        standard_scale=None,  # None: Absolute expression values, "var": Relative to gene
+        show=False,
+        use_raw=False,
+        var_group_rotation=0,
     )
 
     suffix = "_".join(target_genes_dict.keys())
-    filename = f"{series_name}_{suffix}_dotplot.svg"
-    plt.savefig(os.path.join(DOTPLOTS_DIR, filename), format="svg", bbox_inches="tight")
+    filename = "None_dotplot.svg"
+    plt.savefig(os.path.join(dotplots_dir, filename), format="svg", bbox_inches="tight")
+    plt.close()
+
+
+def plot_violin(adata: AnnData, gene: str) -> None:
+    violin_plots_dir = find_env_dir("VIOLIN_PLOTS_DIR")
+    # series_name = adata.obs["series"].iloc[0]
+    series_name = "SCP1038"
+
+    num_categories = len(adata.obs["leiden"].unique())
+    width_per_category = 0.6
+    fig_width = max(5, num_categories * width_per_category)
+    fig_height = 6
+
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    ax.set_yscale("symlog", linthresh=1)
+
+    sc.pl.violin(
+        adata,
+        keys=gene,
+        groupby="leiden",
+        rotation=90,
+        ax=ax,
+        show=False,
+        use_raw=False,
+        stripplot=False,
+        density_norm="count",
+    )
+    ax.set_ylim((0, 100))
+
+    filename = f"{series_name}_{gene}_violin.svg"
+    fig.savefig(
+        os.path.join(violin_plots_dir, filename), format="svg", bbox_inches="tight"
+    )
     plt.close()
