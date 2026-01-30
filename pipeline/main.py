@@ -1,5 +1,6 @@
 # %% Environment Setup
 import gc
+import gseapy as gp
 import os
 import numpy as np
 import pandas as pd
@@ -107,7 +108,7 @@ def doublet_removal(adata: AnnData) -> AnnData:
 # Quality assessment by calculating QC metrics
 def quality_assess(adata: AnnData, ribo_genes: pd.DataFrame) -> AnnData:
     # Marking mitochondrial and ribosomal genes
-    mt_mask = adata.var.index.str.startswith("MT-")
+    mt_mask = adata.var.index.str.lower().str.startswith("mt-")
     ribo_mask = adata.var_names.isin(ribo_genes[0].values)
     adata.var["mt"] = np.asarray(mt_mask, dtype=bool)
     adata.var["ribo"] = np.asarray(ribo_mask, dtype=bool)
@@ -183,7 +184,7 @@ model.save(
     os.path.join(scvi_model_location, series_name), overwrite=True, save_anndata=True
 )
 
-# %% Clustering and DE analysis
+# %% Clustering
 # Uses pre-calculated scVI latent representation for calculating similarity score and constructing neighborhood graph
 # Store settings in .uns["neighbors"] and connectivity matrices in .obsp
 print("Constructing neighborhood graph...")
@@ -207,7 +208,6 @@ plot.plot_umap(filtered_adata)
 print("Differential expression analysis...")
 
 clustered_data_location = find_env_dir("CLUSTERED_DATA_LOCATION")
-de_analysis_location = find_env_dir("DE_ANALYSIS_LOCATION")
 
 filtered_adata.write_h5ad(
     os.path.join(
@@ -217,7 +217,8 @@ filtered_adata.write_h5ad(
 )
 
 
-def pseudobulk_deseq2(adata: AnnData, cluster_key="leiden"):
+# %% Differential Expression Analysis using Pseudobulk DESeq2
+def pseudobulk_deseq2(adata: AnnData, cluster_key="leiden") -> pd.DataFrame:
     clusters = adata.obs[cluster_key].unique().tolist()
     samples = adata.obs["sample"].unique().tolist()
 
@@ -294,7 +295,57 @@ def pseudobulk_deseq2(adata: AnnData, cluster_key="leiden"):
         results.append(res)
 
     results = pd.concat(results, axis=0, ignore_index=True)
-    results.to_csv(os.path.join(de_analysis_location, series_name + "_deseq2.csv"))
+    return results
 
 
-pseudobulk_deseq2(filtered_adata)
+de_analysis_location = find_env_dir("DE_ANALYSIS_LOCATION")
+de_result = pseudobulk_deseq2(filtered_adata)
+de_result.to_csv(os.path.join(de_analysis_location, series_name + "_deseq2.csv"))
+
+
+# %% Gene Set Enrichment Analysis (GSEA)
+def gsea(de_result: pd.DataFrame):
+    enrichment_analysis_location = find_env_dir("ENRICHMENT_ANALYSIS_LOCATION")
+    enrichment_analysis_location = os.path.join(
+        enrichment_analysis_location, series_name
+    )
+    os.makedirs(enrichment_analysis_location, exist_ok=True)
+
+    if "gene" in de_result.columns:
+        de_result = de_result.set_index("gene")
+
+    clean_de = de_result.replace([np.inf, -np.inf], np.nan).dropna(subset=["stat"])
+    clean_de.index = clean_de.index.astype(str).str.upper()
+
+    libraries = [
+        "GO_Biological_Process_2025",
+        "GO_Cellular_Component_2025",
+        "GO_Molecular_Function_2025",
+        "KEGG_2026",
+    ]
+
+    for (cluster, contrast), group_de in clean_de.groupby(["cluster", "contrast"]):
+        rank = group_de["stat"].sort_values(ascending=False).rename("score")
+
+        for lib in libraries:
+            prerank = gp.prerank(
+                rnk=rank,
+                gene_sets=lib,
+                permutation_num=2000,
+                min_size=10,
+                max_size=500,
+                seed=0,
+                threads=CPU_CORE_COUNT,
+                verbose=True,
+            )
+
+            assert prerank.res2d is not None
+            prerank.res2d.sort_values("FDR q-val").to_csv(
+                os.path.join(
+                    enrichment_analysis_location,
+                    f"{series_name}_{cluster}vs{contrast}_{lib}.csv",
+                )
+            )
+
+
+gsea(de_result)

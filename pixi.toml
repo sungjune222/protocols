@@ -1,28 +1,40 @@
 [workspace]
 authors = ["sungjune222"]
 channels = ["conda-forge", "bioconda"]
-name = "scRNA-seq_pipeline"
+name = "protocols"
 platforms = ["linux-64"]
 version = "0.1.0"
 
 [tasks]
 
 [dependencies]
+cmake = ">=4.2.3,<5"
 cuda = "13.1.1.*"
+jupyterlab = ">=4.5.3,<5"
+pixi-kernel = ">=0.7.1,<0.8"
+pkg-config = ">=0.29.2,<0.30"
 python = "3.14.*"
 rpy2 = ">=3.6.4,<4"
-pixi-kernel = ">=0.7.1,<0.8"
-r-base = "4.4.*"
-r-seurat = ">=5.4.0,<6"
-bioconductor-singlecellexperiment = ">=1.28.0,<2"
+r-base = ">=4.5.2,<4.6"
+r-devtools = ">=2.4.6,<3"
+r-httpgd = ">=2.0.4,<3"
+r-igraph = ">=2.1.4,<3"
+r-irkernel = ">=1.3.2,<2"
+r-languageserver = ">=0.3.16,<0.4"
+r-matrix = ">=1.7_4,<2"
+r-png = ">=0.1_8,<0.2"
+r-styler = ">=1.11.0,<2"
+r-svglite = ">=2.2.2,<3"
+zlib = ">=1.3.1,<2"
 
 [pypi-dependencies]
 anndata2ri = ">=2.0, <3"
+gseapy = ">=1.1.11, <2"
 igraph = ">=1.0.0, <2"
+pydeseq2 = ">=0.5.4, <0.6"
 python-dotenv = ">=1.2.1, <2"
 scvi-tools = ">=1.4.1, <2"
 torch = ">=2.9.1, <3"
-pydeseq2 = ">=0.5.4, <0.6"
 
 [activation]
 env = { PYTHONPATH = "$PIXI_PROJECT_ROOT" }
