@@ -1,6 +1,6 @@
-# scRNA-seq Analysis Pipeline
+# Protocols
 
-This repository contains a pipeline for Single-cell RNA sequencing data analysis.
+This repository contains pipelines for biological data analysis.
 
 ## 🚀 Workflow
 
@@ -16,13 +16,14 @@ pixi env sync
 # 3) activate environment
 pixi shell
 
-# 4) install R dependencies
+# 4) install R dependencies (You must use --vanilla to avoid errors)
 Rscript --vanilla install.R
 exit
 
 # 5) update R dependencies
 pixi shell
 ```
+## scRNA-seq Analysis
 
 ### 1. Data Preparation
 First, open and run the **`notebooks/data_prep.ipynb`** notebook.

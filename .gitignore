@@ -10,6 +10,7 @@
 *.pt
 *.gz
 *.tar
+*.eds
 __pycache__/
 *.swp
 # pixi environments
