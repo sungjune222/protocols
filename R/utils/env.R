@@ -15,10 +15,12 @@ get_env <- function(key) {
 }
 
 get_env_dir <- function(key) {
+  root_path <- get_env("ROOT_DIR")
   path <- get_env(key)
+  full_path <- file.path(root_path, path)
 
-  if (!dir.exists(path)) {
-    dir.create(path, recursive = TRUE)
+  if (!dir.exists(full_path)) {
+    dir.create(full_path, recursive = TRUE)
   }
-  path
+  full_path
 }

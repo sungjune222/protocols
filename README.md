@@ -13,14 +13,18 @@ cd protocols
 # 2) sync pixi dependencies
 pixi env sync
 
-# 3) activate environment
+# 3) install external tools and reference files
+chmod +x ./install.sh
+./install.sh
+
+# 4) activate environment
 pixi shell
 
-# 4) install R dependencies (You must use --vanilla to avoid errors)
+# 5) install R dependencies (You must use --vanilla to avoid errors)
 Rscript --vanilla install.R
 exit
 
-# 5) update R dependencies
+# 6) update R dependencies
 pixi shell
 ```
 ## scRNA-seq Analysis

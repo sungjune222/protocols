@@ -11,8 +11,17 @@
 *.gz
 *.tar
 *.eds
+*.sra
+*.fastq
+*.fna
+*.gtf
 __pycache__/
 *.swp
+*.tmp
+activate.sh
+.tools/*
+references/*
+cellranger/*
 # pixi environments
 .pixi/*
 !.pixi/config.toml

@@ -14,11 +14,11 @@ from pipeline.utils.env import find_env_dir
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-eds_name = "2026-01-28_025332_Adult_PIEZO.eds"
+eds_name = "2026-01-27_234145_PUP_PIEZO.eds"
 control_gene = "Actb"
-control_group_keywords = ["control", "ctrl", "ctr", "wildtype", "wt", "normal", "nor", "healthy"]
+control_group_keywords = ["control", "ctrl", "ctr", "wildtype", "wt", "normal", "nor", "healthy", "con"]
 
-eds_qpcr_location = find_env_dir("EDS_DATA_LOCATION")
+eds_qpcr_location = find_env_dir("EDS_DATA")
 eds_path = os.path.join(eds_qpcr_location, eds_name)
 
 z = zipfile.ZipFile(eds_path, 'r')
@@ -53,6 +53,7 @@ if current_meta: data_list.append(current_meta)
 qpcr_data = pd.DataFrame(data_list)
 qpcr_data = qpcr_data[["Sample Name", "Detector", "Ct"]].copy()
 qpcr_data["Ct"] = pd.to_numeric(qpcr_data["Ct"])
+qpcr_data = qpcr_data[qpcr_data["Ct"] < 40]
 qpcr_data.dropna(subset=["Ct"], inplace=True)
 
 ct_values = qpcr_data.pivot(
@@ -70,7 +71,16 @@ assert isinstance(d_ct, pd.DataFrame)
 d_ct = d_ct.drop(columns=[control_gene])
 
 target_genes = d_ct.columns.tolist()
-d_ct["group"] = [name.split(".")[1].split("_")[0].strip() for name in d_ct.index]
+def clean_name(name):
+    if "." in name:
+        name = name.split(".")[-1]
+    
+    if "_" in name:
+        name = name.rsplit("_", 1)[0]
+        
+    return name.strip()
+
+d_ct["group"] = [clean_name(name) for name in d_ct.index]
 
 results = []
 plot_data_list = []
@@ -122,8 +132,7 @@ for gene in target_genes:
             elif p <= 0.01: return "**"
             else: return "*"
         
-        group_mean_d_ct = qpcr_gene[qpcr_gene["group"] == group]["dCt"].mean()
-        mean_fc = 2 ** (-(group_mean_d_ct - control_mean_d_ct))
+        mean_fc = qpcr_gene[qpcr_gene["group"] == group]["Fold Change"].mean()
 
         results.append({
             'Gene': gene,
@@ -142,7 +151,7 @@ for gene in target_genes:
     
     plot_data_list.append(qpcr_gene)
 
-qpcr_results_location = find_env_dir("QPCR_RESULTS_LOCATION")
+qpcr_results_location = find_env_dir("QPCR_RESULTS")
 qpcr_results_location = os.path.join(qpcr_results_location, eds_name.replace(".eds", ""))
 os.makedirs(
     qpcr_results_location,

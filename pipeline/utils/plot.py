@@ -23,7 +23,7 @@ warnings.filterwarnings("ignore", message="Tight layout not applied")
 
 # Plots validation loss over training epochs
 def plot_validation_loss(
-    model: scvi.model.SCVI | scvi.external.SOLO, filename: str
+    model: scvi.model.SCVI | scvi.external.SOLO, series_name: str, file_info: str
 ) -> None:
     validation_loss_plots_dir = find_env_dir("VALIDATION_LOSS_PLOTS_DIR")
 
@@ -48,7 +48,7 @@ def plot_validation_loss(
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(
-        os.path.join(validation_loss_plots_dir, filename),
+        os.path.join(validation_loss_plots_dir, f"{series_name}_{file_info}.svg"),
         format="svg",
         bbox_inches="tight",
     )
@@ -56,9 +56,8 @@ def plot_validation_loss(
 
 
 # %% Visualizes sample quality metrics across multiple samples
-def plot_qc(adata: AnnData) -> None:
+def plot_qc(adata: AnnData, series_name: str) -> None:
     qc_ridgeplots_dir = find_env_dir("QC_RIDGEPLOTS_DIR")
-    series_name = adata[0].obs["series"].iloc[0]
     qc_ridgeplots_dir = os.path.join(qc_ridgeplots_dir, series_name)
     os.makedirs(
         qc_ridgeplots_dir,
@@ -69,14 +68,12 @@ def plot_qc(adata: AnnData) -> None:
     sample_quality = adata.obs.sort_values("sample")
 
     variables = [
-        "singlet_probability",
         "pct_counts_mt",
         "n_genes_by_counts",
         "pct_counts_in_top_20_genes",
         "log1p_total_counts",
     ]
     pretty_names = {
-        "singlet_probability": "Singlet Probability",
         "pct_counts_mt": "Mitochondrial Fraction (%)",
         "n_genes_by_counts": "Detected Genes",
         "pct_counts_in_top_20_genes": "Library Complexity (Top 20%)",
@@ -99,10 +96,23 @@ def plot_qc(adata: AnnData) -> None:
         )
         # Draw KDE (Kernel Density Estimation) plot
         sns_grid.map(
-            sns.kdeplot, variable, clip_on=False, fill=True, alpha=0.8, linewidth=1.5
+            sns.kdeplot,
+            variable,
+            clip_on=False,
+            fill=True,
+            alpha=0.8,
+            linewidth=1.5,
+            warn_singular=False,
         )
         # Outlining the KDE plot with white line
-        sns_grid.map(sns.kdeplot, variable, clip_on=False, color="w", linewidth=2)
+        sns_grid.map(
+            sns.kdeplot,
+            variable,
+            clip_on=False,
+            color="w",
+            linewidth=2,
+            warn_singular=False,
+        )
         # Depicting a y axis
         sns_grid.map(plt.axhline, y=0, linewidth=2, clip_on=False)
 
@@ -196,13 +206,13 @@ def plot_qc(adata: AnnData) -> None:
 # additional_config can be used to provide extra plotting configurations
 def plot_umap(
     adata: AnnData,
+    series_name: str,
     has_celltype: bool = False,
     highlight_cells: Optional[List[str]] = None,
     additional_config: Optional[List[Dict[str, Any]]] = None,
     dot_size: int = 7,
 ) -> None:
     umap_plots_dir = find_env_dir("UMAP_PLOTS_DIR")
-    series_name = adata[0].obs["series"].iloc[0]
     umap_plots_dir = os.path.join(umap_plots_dir, series_name)
     os.makedirs(
         umap_plots_dir,
@@ -289,9 +299,10 @@ def plot_umap(
         plt.close(fig)
 
 
-def plot_dotplot(adata: AnnData, target_genes_dict: Dict[str, List[str]]) -> None:
+def plot_dotplot(
+    adata: AnnData, series_name: str, target_genes_dict: Dict[str, List[str]], group: str
+) -> None:
     dotplots_dir = find_env_dir("DOTPLOTS_DIR")
-    series_name = adata.obs["series"].iloc[0]
     suffix = "_".join(target_genes_dict.keys())
     dotplots_dir = os.path.join(dotplots_dir, series_name + "_" + suffix)
     os.makedirs(
@@ -333,7 +344,7 @@ def plot_dotplot(adata: AnnData, target_genes_dict: Dict[str, List[str]]) -> Non
     assert isinstance(adata.obs, pd.DataFrame)
     core_adata = AnnData(
         X=target_gene_expression,
-        obs=adata.obs[["leiden"]].copy(),
+        obs=adata.obs[[group]].copy(),
         var=pd.DataFrame(index=all_target_genes),
     )
 
@@ -344,7 +355,7 @@ def plot_dotplot(adata: AnnData, target_genes_dict: Dict[str, List[str]]) -> Non
     sc.pl.dotplot(
         core_adata,
         var_names=target_genes_dict,
-        groupby="leiden",
+        groupby=group,
         standard_scale="var",  # None: Absolute expression values, "var": Relative to gene
         show=False,
         use_raw=False,
@@ -357,7 +368,7 @@ def plot_dotplot(adata: AnnData, target_genes_dict: Dict[str, List[str]]) -> Non
     sc.pl.dotplot(
         core_adata,
         var_names=target_genes_dict,
-        groupby="leiden",
+        groupby=group,
         standard_scale=None,  # None: Absolute expression values, "var": Relative to gene
         show=False,
         use_raw=False,
@@ -399,5 +410,50 @@ def plot_violin(adata: AnnData, gene: str) -> None:
     filename = f"{series_name}_{gene}_violin.svg"
     fig.savefig(
         os.path.join(violin_plots_dir, filename), format="svg", bbox_inches="tight"
+    )
+    plt.close()
+
+def plot_proportions(
+        adata: AnnData,
+        series_name: str,
+        group_key: str,
+        sample_key: str
+    ):
+    proportions_plots_dir = find_env_dir("PROPORTION_PLOTS_DIR")
+    proportions_plots_dir = os.path.join(proportions_plots_dir, series_name)
+    os.makedirs(proportions_plots_dir, exist_ok=True)
+
+    prop_df = pd.crosstab(
+        adata.obs[group_key].to_numpy(), 
+        adata.obs[sample_key].to_numpy(), 
+        normalize='index'
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    prop_df.plot(
+        kind='bar', 
+        stacked=True, 
+        ax=ax, 
+        colormap='tab20',
+        edgecolor='none'
+    )
+
+    plt.title(f"Proportion of {sample_key} by {group_key}", fontsize=14)
+    plt.xlabel(group_key.capitalize(), fontsize=12)
+    plt.ylabel("Proportion", fontsize=12)
+    plt.xticks(rotation=45, ha='right') 
+    
+    plt.legend(
+        title=sample_key, 
+        bbox_to_anchor=(1.05, 1), 
+        loc='upper left', 
+        borderaxespad=0.
+    )
+
+    plt.tight_layout()
+    filename = f"proportion_{group_key}_by_{sample_key}.svg"
+    fig.savefig(
+        os.path.join(proportions_plots_dir, filename), format="svg", bbox_inches="tight"
     )
     plt.close()

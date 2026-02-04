@@ -11,7 +11,9 @@ def find_env(var_name: str) -> str:
 
 
 def find_env_dir(var_name: str) -> str:
+    root_path = find_env("ROOT_DIR")
     dir_path = find_env(var_name)
-    os.makedirs(dir_path, exist_ok=True)
+    full_path = os.path.join(root_path, dir_path)
+    os.makedirs(full_path, exist_ok=True)
 
-    return dir_path
+    return full_path

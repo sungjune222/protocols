@@ -7,8 +7,8 @@ invisible(
 )
 
 series_name <- "SCP1038"
-clustered_data_dir <- get_env_dir("CLUSTERED_DATA_LOCATION")
-cellchat_dir <- get_env_dir("CELLCHAT_DATA_LOCATION")
+clustered_data_dir <- get_env_dir("CLUSTERED_DATA")
+cellchat_dir <- get_env_dir("CELLCHAT")
 cellchat_dir <- file.path(cellchat_dir, series_name)
 dir.create(cellchat_dir, recursive = TRUE, showWarnings = FALSE)
 
