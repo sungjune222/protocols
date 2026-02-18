@@ -6,22 +6,27 @@ This repository contains pipelines for biological data analysis.
 
 ### 0. Environment Setup
 ```bash
+# 0) Install and initialize Pixi
+curl -fsSL https://pixi.sh/install.sh | bash
+source ~/.bashrc
+
 # 1) clone repository
 git clone https://github.com/sungjune222/protocols.git
 cd protocols
 
-# 2) sync pixi dependencies
-pixi env sync
+# 2) Install pixi dependencies
+pixi install
 
-# 3) install external tools and reference files
-chmod +x ./install.sh
-./install.sh
-
-# 4) activate environment
+# 3) activate environment
 pixi shell
 
+# 4) install external tools and reference files
+chmod +x ./install.sh
+./install.sh
+# Paste Cell Ranger download URL and press Enter when requested
+
 # 5) install R dependencies (You must use --vanilla to avoid errors)
-Rscript --vanilla install.R
+Rscript --vanilla R/install.R
 exit
 
 # 6) update R dependencies

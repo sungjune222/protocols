@@ -21,9 +21,11 @@ anndata.settings.allow_write_nullable_strings = True
 
 if __name__ == "__main__":
     # Loading .env
-    h5ad_count_matrix_location = find_env_dir("H5AD_COUNT_MATRIX")
-    series_name = "oligo"
-    file = os.path.join(h5ad_count_matrix_location, series_name + ".h5ad")
+    h5ad_matrix_location = find_env_dir("H5AD_MATRIX")
+    series_name = "Zheng_opc"
+    covariates = ["series"]
+    group_keys = ["condition"]
+    file = os.path.join(h5ad_matrix_location, series_name + ".h5ad")
 
     # %% Preprocessing functions
 
@@ -89,8 +91,7 @@ if __name__ == "__main__":
     scvi.model.SCVI.setup_anndata(
         scvi_adata,
         # The primary batch info
-        batch_key="series",
-        categorical_covariate_keys=["sample"],
+        batch_key="sample",
     )
     model = scvi.model.SCVI(scvi_adata, n_latent=50)
     model.train(
@@ -99,6 +100,8 @@ if __name__ == "__main__":
         datasplitter_kwargs=DataLoader,
         train_size=0.9,
         check_val_every_n_epoch=1,
+        max_epochs=500,
+        early_stopping=True,
     )
     plot.plot_validation_loss(model, series_name, file_info="model_validation_loss")
 
@@ -142,7 +145,7 @@ if __name__ == "__main__":
     # High resolution value results in more clusters
     print("Clustering with Leiden algorithm...")
     sc.tl.leiden(
-        filtered_adata, resolution=3.0, flavor="igraph", n_iterations=-1, directed=False
+        filtered_adata, resolution=1.5, flavor="igraph", n_iterations=-1, directed=False
     )
     plot.plot_umap(filtered_adata, series_name)
 
@@ -161,7 +164,7 @@ if __name__ == "__main__":
 
     # %% Differential Expression Analysis using Pseudobulk DESeq2
     de_analysis_location = find_env_dir("DESEQ")
-    de_result = pseudobulk_deseq2(filtered_adata, group_keys="leiden")
+    de_result = pseudobulk_deseq2(filtered_adata, group_keys=group_keys, covariates=covariates)
     de_result.to_csv(os.path.join(de_analysis_location, series_name + "_deseq2.csv"))
 
     # %% Gene Set Enrichment Analysis (GSEA)

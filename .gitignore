@@ -1,20 +1,25 @@
 .env
 *.png
 *.svg
+*.h5
 *.h5ad
 *.csv
 *.tsv
 *.mtx
 *.rds
 *.txt
+*.pdf
+*.log
 *.pt
 *.gz
 *.tar
+*.zip
 *.eds
 *.sra
 *.fastq
 *.fna
 *.gtf
+*.pkl
 __pycache__/
 *.swp
 *.tmp
@@ -22,6 +27,8 @@ activate.sh
 .tools/*
 references/*
 cellranger/*
+raw/*
+article/*
 # pixi environments
 .pixi/*
 !.pixi/config.toml

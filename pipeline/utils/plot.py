@@ -25,7 +25,7 @@ warnings.filterwarnings("ignore", message="Tight layout not applied")
 def plot_validation_loss(
     model: scvi.model.SCVI | scvi.external.SOLO, series_name: str, file_info: str
 ) -> None:
-    validation_loss_plots_dir = find_env_dir("VALIDATION_LOSS_PLOTS_DIR")
+    validation_loss_plots_dir = find_env_dir("VALIDATION_LOSS_PLOTS")
 
     if model.history is None:
         raise ValueError("Model history is not available.")
@@ -57,7 +57,7 @@ def plot_validation_loss(
 
 # %% Visualizes sample quality metrics across multiple samples
 def plot_qc(adata: AnnData, series_name: str) -> None:
-    qc_ridgeplots_dir = find_env_dir("QC_RIDGEPLOTS_DIR")
+    qc_ridgeplots_dir = find_env_dir("QC_RIDGEPLOTS")
     qc_ridgeplots_dir = os.path.join(qc_ridgeplots_dir, series_name)
     os.makedirs(
         qc_ridgeplots_dir,
@@ -212,7 +212,7 @@ def plot_umap(
     additional_config: Optional[List[Dict[str, Any]]] = None,
     dot_size: int = 7,
 ) -> None:
-    umap_plots_dir = find_env_dir("UMAP_PLOTS_DIR")
+    umap_plots_dir = find_env_dir("UMAP_PLOTS")
     umap_plots_dir = os.path.join(umap_plots_dir, series_name)
     os.makedirs(
         umap_plots_dir,
@@ -223,6 +223,9 @@ def plot_umap(
     idx = np.random.permutation(adata.n_obs)
     plot_adata = AnnData(obs=adata.obs.iloc[idx].copy())
     plot_adata.obsm["X_umap"] = adata.obsm["X_umap"][idx].copy()
+
+    n_samples = len(adata.obs['sample'].unique())
+    sample_palette = sns.color_palette("husl", n_samples)
 
     plot_configs = [
         {
@@ -235,7 +238,7 @@ def plot_umap(
             "color": "sample",
             "title": "Sample Distribution",
             "legend_loc": "best",
-            "palette": None,
+            "palette": sample_palette,
         },
     ]
 
@@ -302,7 +305,7 @@ def plot_umap(
 def plot_dotplot(
     adata: AnnData, series_name: str, target_genes_dict: Dict[str, List[str]], group: str
 ) -> None:
-    dotplots_dir = find_env_dir("DOTPLOTS_DIR")
+    dotplots_dir = find_env_dir("DOTPLOTS")
     suffix = "_".join(target_genes_dict.keys())
     dotplots_dir = os.path.join(dotplots_dir, series_name + "_" + suffix)
     os.makedirs(
@@ -382,7 +385,7 @@ def plot_dotplot(
 
 
 def plot_violin(adata: AnnData, gene: str) -> None:
-    violin_plots_dir = find_env_dir("VIOLIN_PLOTS_DIR")
+    violin_plots_dir = find_env_dir("VIOLIN_PLOTS")
     # series_name = adata.obs["series"].iloc[0]
     series_name = "SCP1038"
 
@@ -419,7 +422,7 @@ def plot_proportions(
         group_key: str,
         sample_key: str
     ):
-    proportions_plots_dir = find_env_dir("PROPORTION_PLOTS_DIR")
+    proportions_plots_dir = find_env_dir("PROPORTION_PLOTS")
     proportions_plots_dir = os.path.join(proportions_plots_dir, series_name)
     os.makedirs(proportions_plots_dir, exist_ok=True)
 
