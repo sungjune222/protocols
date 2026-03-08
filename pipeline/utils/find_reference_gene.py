@@ -32,8 +32,18 @@ def find_pseudobulk_reference_genes(
 
     M = csr_matrix((val, (row_idx, col_idx)), shape=(n_samples, adata.n_obs))
     pb_X = M.dot(adata.X) 
-    
     pb_dense = np.asarray(pb_X.todense())
+
+    assert isinstance(adata.X, csr_matrix)
+    X_binary = adata.X.copy()
+    X_binary.data = np.ones_like(X_binary.data)
+    cells_expressing = M.dot(X_binary)
+    cells_expressing_dense = np.asarray(cells_expressing.todense())
+    
+    n_cells_per_sample = np.asarray(M.sum(axis=1)).flatten()
+    cell_expr_fraction_per_sample = cells_expressing_dense / n_cells_per_sample[:, np.newaxis]
+    mean_cell_expr_fraction = cell_expr_fraction_per_sample.mean(axis=0)
+
     expressed_fraction = (pb_dense > 0).mean(axis=0)
     
     robust_mask = expressed_fraction >= min_sample_fraction
@@ -55,7 +65,8 @@ def find_pseudobulk_reference_genes(
         'Expressed_Fraction': expressed_fraction,
         'Mean_Abs_Expression': gene_mean,
         'Std_Deviation': gene_std,
-        'CV': gene_cv
+        'CV': gene_cv,
+        'Mean_Cell_Expressed_Fraction': mean_cell_expr_fraction,
     }, index=adata.var_names)
     
     stability_df = stability_df.replace([np.inf, -np.inf], np.nan).dropna()

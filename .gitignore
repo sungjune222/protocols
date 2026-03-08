@@ -28,7 +28,7 @@ activate.sh
 references/*
 cellranger/*
 raw/*
-article/*
+notebooks_example/project/*
 # pixi environments
 .pixi/*
 !.pixi/config.toml

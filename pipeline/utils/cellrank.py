@@ -10,9 +10,9 @@ from pipeline.utils.env import find_env_dir
 
  # %% CellRank-based Trajectory Inference and Gene Trend Analysis
 def cellrank_analysis(adata: AnnData, series_name: str, start_cluster: str, target_gene: str, group_key: str = "leiden"):
-    cellrank_analysis_location = find_env_dir("CELLRANK")
-    cellrank_analysis_location = os.path.join(cellrank_analysis_location, series_name)
-    os.makedirs(cellrank_analysis_location, exist_ok=True)
+    cellrank_location = find_env_dir("CELLRANK")
+    cellrank_location = os.path.join(cellrank_location, series_name)
+    os.makedirs(cellrank_location, exist_ok=True)
 
     # Calculating connectivity graph between clusters using PAGA
     sc.tl.paga(adata, groups=group_key)
@@ -35,7 +35,7 @@ def cellrank_analysis(adata: AnnData, series_name: str, start_cluster: str, targ
         basis="umap",
         color=group_key,
         title="Model-based Differentiation Flow",
-        save=os.path.join(cellrank_analysis_location, "differentiation_flow_umap.svg"),
+        save=os.path.join(cellrank_location, "differentiation_flow_umap.svg"),
     )
 
     #  Generalized Perron Cluster Cluster Analysis (GPCCA)
@@ -48,14 +48,10 @@ def cellrank_analysis(adata: AnnData, series_name: str, start_cluster: str, targ
     gpcca.plot_fate_probabilities(  # type: ignore
         same_plot=True,
         basis="umap",
-        save=os.path.join(cellrank_analysis_location, "fate_probabilities_umap.svg"),
+        save=os.path.join(cellrank_location, "fate_probabilities_umap.svg"),
     )
 
-    assert(gpcca.initial_states is not None)
     assert (gpcca.terminal_states is not None)
-    init = gpcca.initial_states.copy() 
-    term = gpcca.terminal_states
-
     trend_model = GAM(adata)
     lineages = gpcca.terminal_states.cat.categories
 
@@ -69,7 +65,7 @@ def cellrank_analysis(adata: AnnData, series_name: str, start_cluster: str, targ
         same_plot=True,
         hide_cells=True,
         figsize=(10, 6),
-        save=os.path.join(cellrank_analysis_location, f"gene_trends_{target_gene}.svg"),
+        save=os.path.join(cellrank_location, f"gene_trends_{target_gene}.svg"),
     )
 
     drivers = gpcca.compute_lineage_drivers()  # type: ignore

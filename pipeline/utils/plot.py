@@ -17,6 +17,7 @@ from anndata import AnnData
 from scipy.sparse import issparse, csr_matrix
 from typing import List, Dict, Any, Optional
 from pipeline.utils.env import find_env_dir
+from pipeline.utils.pseudobulk import pseudobulk
 
 warnings.filterwarnings("ignore", message="Tight layout not applied")
 
@@ -303,15 +304,35 @@ def plot_umap(
 
 
 def plot_dotplot(
-    adata: AnnData, series_name: str, target_genes_dict: Dict[str, List[str]], group: str
+    adata: AnnData, series_name: str, target_genes_dict: Dict[str, List[str]], group: str, 
+    filter_dict: dict = {},
+    project: Optional[str] = None,
+    is_pseudobulk: bool = False,
 ) -> None:
     dotplots_dir = find_env_dir("DOTPLOTS")
+    if is_pseudobulk:
+        series_name = series_name + "_pseudobulk"
     suffix = "_".join(target_genes_dict.keys())
-    dotplots_dir = os.path.join(dotplots_dir, series_name + "_" + suffix)
+    if filter_dict:
+        flattened = [item for sublist in filter_dict.values() for item in sublist]
+        suffix = "_".join(flattened) + "_" + suffix
+    if project is not None:
+        dotplots_dir = os.path.join(dotplots_dir, project)
+    dotplots_dir = os.path.join(dotplots_dir, "_".join([series_name, suffix]))
     os.makedirs(
         dotplots_dir,
         exist_ok=True,
     )
+
+    mask = pd.Series(True, index=adata.obs.index)
+    for col, values in filter_dict.items():
+        if col not in adata.obs.columns:
+            raise ValueError(f"Column '{col}' not found in adata.obs")
+        
+        if isinstance(values, str):
+            values = [values]
+        mask = mask & adata.obs[col].isin(values)
+    adata = adata[mask]
 
     all_target_genes = []
     for genes in target_genes_dict.values():
@@ -332,26 +353,40 @@ def plot_dotplot(
     if missing_genes:
         raise ValueError(f"Such genes are missing in the data: {missing_genes}")
 
-    assert isinstance(adata.X, csr_matrix)
-    if issparse(adata.X):
+    if is_pseudobulk:
+        group_keys = ["sample", group]
+        pb_counts_df, pb_meta = pseudobulk(adata, group_keys=group_keys)
+        pb_counts_target = pb_counts_df[all_target_genes]
+
+        core_adata = AnnData(
+            X=pb_counts_target.to_numpy().astype(np.float32),
+            obs=pb_meta.copy(),
+            var=pd.DataFrame(index=all_target_genes)
+        )
+
+        library_size = pb_meta["library_size"].to_numpy().astype(np.float32)
+
+        assert isinstance(core_adata.obs, pd.DataFrame)
+        core_adata.obs[group] = core_adata.obs[group].astype(str).astype('category')
+    
+    else:
+        target_gene_expression = adata[:, all_target_genes].X
+        if isinstance(target_gene_expression, csr_matrix):
+            target_gene_expression = target_gene_expression.toarray()
+        else:
+            target_gene_expression = np.asarray(target_gene_expression)
+            
+        assert isinstance(adata.X, csr_matrix)
         library_size = np.array(adata.X.sum(axis=1)).ravel()
-    else:
-        library_size = adata.X.sum(axis=1)
+        
+        assert isinstance(adata.obs, pd.DataFrame)
+        core_adata = AnnData(
+            X=target_gene_expression,
+            obs=adata.obs[[group]].copy(),
+            var=pd.DataFrame(index=all_target_genes),
+        )
 
-    target_gene_expression = adata[:, all_target_genes].X
-    if isinstance(target_gene_expression, csr_matrix):
-        target_gene_expression = target_gene_expression.toarray()
-    else:
-        target_gene_expression = np.asarray(target_gene_expression)
-
-    assert isinstance(adata.obs, pd.DataFrame)
-    core_adata = AnnData(
-        X=target_gene_expression,
-        obs=adata.obs[[group]].copy(),
-        var=pd.DataFrame(index=all_target_genes),
-    )
-
-    library_size = np.where(library_size == 0, 1, library_size)
+    library_size = np.where(library_size == 0, 1, library_size) 
     core_adata.X = (core_adata.X / library_size[:, np.newaxis]) * 1e4
     sc.pp.log1p(core_adata)
 

@@ -8,7 +8,7 @@ from scipy.sparse import csr_matrix
 def pseudobulk(
     adata: AnnData,
     group_keys: Iterable[str],
-    min_cells: int = 15,
+    min_cells: int = 30,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     sep = "__"
     keys = list(group_keys)
@@ -18,7 +18,7 @@ def pseudobulk(
 
     assert isinstance(adata.obs, pd.DataFrame)
     group_df = adata.obs[keys].astype(str)
-    group_id = group_df.agg(sep.join, axis=1)
+    group_id = group_df.apply(lambda row: sep.join(map(str, row.tolist())), axis=1)
 
     sizes = group_id.value_counts()
     keep_groups = sizes[sizes >= min_cells].index

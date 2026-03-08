@@ -9,7 +9,11 @@ from pipeline.config.constants import CPU_CORE_COUNT
 
 
 def pseudobulk_deseq2(
-    adata: AnnData,  group_keys: Union[str, Iterable[str]], covariates: Union[str, Iterable[str]], min_cells: int = 15
+    adata: AnnData,  
+    group_keys: Union[str, Iterable[str]], 
+    covariates: Union[str, Iterable[str]], 
+    filter_dict: dict = {},
+    min_cells: int = 30
 ) -> pd.DataFrame:
     sep = "__"
     group_keys = [group_keys] if isinstance(group_keys, str) else list(group_keys)
@@ -18,14 +22,22 @@ def pseudobulk_deseq2(
     for k in group_keys:
         if k not in adata.obs.columns:
             raise ValueError(f"Key '{k}' not found in adata.obs")
-        
+
+    mask = np.ones(adata.n_obs, dtype=bool)
+    for col, vals in filter_dict.items():
+        if col not in adata.obs.columns:
+            raise ValueError(f"Filter column '{col}' not found in adata.obs")
+        mask &= adata.obs[col].isin(vals) 
+    adata = adata[mask]
+    
     target_col = "comparison_group"
     formula_terms = covariates + [target_col]
     design_formula = "~" + " + ".join(formula_terms)
 
-    sc_counts, sc_meta = pseudobulk(adata, group_keys=["sample", *group_keys], min_cells=1)
-    sc_ncells = sc_meta["n_cells"]
+    sc_counts, sc_meta = pseudobulk(adata, group_keys=["sample", *group_keys], min_cells=1)    
     s_counts, s_meta = pseudobulk(adata, group_keys=["sample"], min_cells=1)
+
+    sc_ncells = sc_meta["n_cells"]
     s_ncells = s_meta["n_cells"]
 
     samples = adata.obs["sample"].unique().tolist()
@@ -98,8 +110,16 @@ def pseudobulk_deseq2(
         meta = pd.DataFrame(meta_rows, index=idx)
         meta[target_col] = pd.Categorical(meta[target_col], categories=["rest", "group"])
 
-        keep_genes = counts.sum(axis=0) > 0
+        min_samples = 3
+        min_count_per_sample = 2
+        keep_genes = (counts >= min_count_per_sample).sum(axis=0) >= min_samples
         counts = counts.loc[:, keep_genes]
+
+        design_cols = covariates + [target_col]
+        ok = meta[design_cols].notna().all(axis=1)
+        
+        meta = meta.loc[ok].copy()
+        counts = counts.loc[meta.index].copy()
 
         dds = DeseqDataSet(
             counts=counts,
@@ -107,11 +127,14 @@ def pseudobulk_deseq2(
             design=design_formula,
             refit_cooks=True,
             n_cpus=CPU_CORE_COUNT,
+            quiet=True
         )
         dds.deseq2()
 
         ds = DeseqStats(
-            dds, contrast=[target_col, "group", "rest"], n_cpus=CPU_CORE_COUNT
+            dds, contrast=[target_col, "group", "rest"], 
+            n_cpus=CPU_CORE_COUNT, 
+            quiet=True
         )
         ds.summary()
 
@@ -130,19 +153,32 @@ def pseudobulk_deseq2(
 
 
 def pseudobulk_deseq2_comp(
-    adata: AnnData, condition_col: str, group_test: str, group_control: str, covariates: Union[str, Iterable[str]], min_cells: int = 15
+    adata: AnnData, 
+    condition_col: str, group_test: str, group_control: str, 
+    covariates: Union[str, Iterable[str]],
+    filter_dict: dict = {},
+    min_cells: int = 30
 ) -> pd.DataFrame:
+    group_keys = ["sample", condition_col]
     covariates = [covariates] if isinstance(covariates, str) else list(covariates)
     formula_terms = covariates + [condition_col]
     design_formula = "~" + " + ".join(formula_terms)
 
     cond_mask = np.array(adata.obs[condition_col].isin([group_test, group_control]), dtype=bool)
+    for col, vals in filter_dict.items():
+        cond_mask &= adata.obs[col].isin(vals)
 
-    counts_df, pb_meta = pseudobulk(adata[cond_mask], group_keys=["sample"], min_cells=min_cells)
-    pb_counts = counts_df.loc[:, counts_df.sum(axis=0) > 0]
+    counts_df, pb_meta = pseudobulk(adata[cond_mask], group_keys=group_keys, min_cells=min_cells)
+
+    min_samples = 3
+    min_count_per_sample = 2
+    keep_genes = (counts_df >= min_count_per_sample).sum(axis=0) >= min_samples
+    pb_counts = counts_df.loc[:, keep_genes]
 
     assert isinstance(adata.obs, pd.DataFrame)
-    meta = adata.obs.drop_duplicates(subset=["sample"]).set_index("sample").loc[pb_counts.index]
+    obs_meta = adata.obs.drop_duplicates(subset=group_keys).copy()
+    obs_meta["pseudobulk_id"] = obs_meta[group_keys].astype(str).agg("__".join, axis=1)
+    meta = obs_meta.set_index("pseudobulk_id").loc[pb_counts.index]
     meta["n_cells"] = pb_meta["n_cells"]
     meta["library_size"] = pb_meta["library_size"]
     
@@ -150,17 +186,26 @@ def pseudobulk_deseq2_comp(
         if meta[col].dtype == 'object' or meta[col].dtype.name == 'category':
             meta[col] = meta[col].astype(str).astype('category')
 
+    design_cols = covariates + [condition_col]
+    ok = meta[design_cols].notna().all(axis=1)
+
+    meta = meta.loc[ok].copy()
+    pb_counts = pb_counts.loc[meta.index].copy()
+
     dds = DeseqDataSet(
         counts=pb_counts,
         metadata=meta,
         design=design_formula,
         refit_cooks=True,
-        n_cpus=CPU_CORE_COUNT
+        n_cpus=CPU_CORE_COUNT,
+        quiet=True
     )
     dds.deseq2()
-    
+
     ds = DeseqStats(
-        dds, contrast=[condition_col, group_test, group_control], n_cpus=CPU_CORE_COUNT
+        dds, contrast=[condition_col, group_test, group_control], 
+        n_cpus=CPU_CORE_COUNT,
+        quiet=True
     )
     ds.summary()
     

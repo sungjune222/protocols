@@ -57,54 +57,78 @@ fi
 echo "Cell Ranger is ready: $(which cellranger)"
 
 # ==========================================
-# 2. T2T-CHM13 v2.0 Reference Builder
+# 2. Reference Builder
 # ==========================================
-BASE_URL="https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/009/914/755/GCF_009914755.1_T2T-CHM13v2.0"
-FASTA_FILE="GCF_009914755.1_T2T-CHM13v2.0_genomic.fna.gz"
-GTF_FILE="GCF_009914755.1_T2T-CHM13v2.0_genomic.gtf.gz"
+function build_cellranger_ref() {
+    local BASE_URL="$1"
+    local FASTA_FILE="$2"
+    local GTF_FILE="$3"
+    local OUTPUT_GENOME="$4"
 
-REF_DIR="$ROOT_DIR/references/raw"
-OUTPUT_GENOME="T2T_CHM13_v2_0"
+    local REF_DIR="$ROOT_DIR/references/raw"
+    local FASTA_UNZIPPED="$REF_DIR/${FASTA_FILE%.gz}"
+    local GTF_UNZIPPED="$REF_DIR/${GTF_FILE%.gz}"
 
-mkdir -p "$REF_DIR"
+    echo " Building Reference: $OUTPUT_GENOME"
+    mkdir -p "$REF_DIR"
 
-echo "Checking Reference Files..."
+    echo "Checking Reference Files..."
+    if [ ! -f "$REF_DIR/$FASTA_FILE" ]; then
+        echo "Downloading FASTA..."
+        wget -O "$REF_DIR/$FASTA_FILE" "$BASE_URL/$FASTA_FILE"
+    fi
 
-if [ ! -f "$REF_DIR/$FASTA_FILE" ]; then
-    echo "Downloading FASTA..."
-    wget -O "$REF_DIR/$FASTA_FILE" "$BASE_URL/$FASTA_FILE"
-fi
+    if [ ! -f "$REF_DIR/$GTF_FILE" ]; then
+        echo "Downloading GTF..."
+        wget -O "$REF_DIR/$GTF_FILE" "$BASE_URL/$GTF_FILE"
+    fi
 
-if [ ! -f "$REF_DIR/$GTF_FILE" ]; then
-    echo "Downloading GTF..."
-    wget -O "$REF_DIR/$GTF_FILE" "$BASE_URL/$GTF_FILE"
-fi
+    echo "Unzipping (Keep originals)..."
+    if [ ! -f "$FASTA_UNZIPPED" ]; then
+        gunzip -k "$REF_DIR/$FASTA_FILE"
+    fi
+    if [ ! -f "$GTF_UNZIPPED" ]; then
+        gunzip -k "$REF_DIR/$GTF_FILE"
+    fi
 
-echo "Unzipping (Keep originals)..."
-if [ ! -f "$REF_DIR/${FASTA_FILE%.gz}" ]; then
-    gunzip -k "$REF_DIR/$FASTA_FILE"
-fi
-if [ ! -f "$REF_DIR/${GTF_FILE%.gz}" ]; then
-    gunzip -k "$REF_DIR/$GTF_FILE"
-fi
+    sed -i 's/Curated Genomic/Curated_Genomic/g' "$GTF_UNZIPPED"
 
-FASTA_UNZIPPED="$REF_DIR/${FASTA_FILE%.gz}"
-GTF_UNZIPPED="$REF_DIR/${GTF_FILE%.gz}"
+    mkdir -p "$ROOT_DIR/references"
+    cd "$ROOT_DIR/references" || exit 1
 
-sed -i 's/Curated Genomic/Curated_Genomic/g' "$GTF_UNZIPPED"
-
-echo "Running cellranger mkref..."
-cd references
-
-cellranger telemetry disable
-cellranger mkref \
-    --genome="$OUTPUT_GENOME" \
-    --fasta="$FASTA_UNZIPPED" \
-    --genes="$GTF_UNZIPPED" \
-    --nthreads="$N_THREADS"
+    if [ -d "$OUTPUT_GENOME" ]; then
+        echo "Reference '$OUTPUT_GENOME' already exists. Skipping mkref."
+    else
+        echo "Running cellranger mkref..."
+        cellranger telemetry disable
+        cellranger mkref \
+            --genome="$OUTPUT_GENOME" \
+            --fasta="$FASTA_UNZIPPED" \
+            --genes="$GTF_UNZIPPED" \
+            --nthreads="$N_THREADS"
+    fi
+}
 
 # ==========================================
-# 3. Download Homo Sapiens Ensembl GTF for later use
+# 3. Building References
+# ==========================================
+
+# Homo sapiens (human) T2T-CHM13 v2.0
+build_cellranger_ref \
+    "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/009/914/755/GCF_009914755.1_T2T-CHM13v2.0" \
+    "GCF_009914755.1_T2T-CHM13v2.0_genomic.fna.gz" \
+    "GCF_009914755.1_T2T-CHM13v2.0_genomic.gtf.gz" \
+    "T2T_CHM13_v2_0"
+
+# Callithrix jacchus (white-tufted-ear marmoset) calJac240_pri
+build_cellranger_ref \
+    "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/049/354/715/GCF_049354715.1_calJac240_pri" \
+    "GCF_049354715.1_calJac240_pri_genomic.fna.gz" \
+    "GCF_049354715.1_calJac240_pri_genomic.gtf.gz" \
+    "calJac240_pri"
+
+# ==========================================
+# 4. Download Homo Sapiens Ensembl GTF for later use
 # ==========================================
 BASE_URL="https://ftp.ensembl.org/pub/release-115/gtf/homo_sapiens"
 GTF_FILE="Homo_sapiens.GRCh38.115.gtf.gz"
@@ -123,7 +147,7 @@ fi
 GTF_UNZIPPED="$REF_DIR/${GTF_FILE%.gz}"
 
 # ==========================================
-# 4. Download Mus Musculus Ensembl GTF for later use
+# 5. Download Mus Musculus Ensembl GTF for later use
 # ==========================================
 BASE_URL="https://ftp.ensembl.org/pub/release-115/gtf/mus_musculus"
 GTF_FILE="Mus_musculus.GRCm39.115.gtf.gz"

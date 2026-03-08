@@ -22,9 +22,9 @@ anndata.settings.allow_write_nullable_strings = True
 if __name__ == "__main__":
     # Loading .env
     h5ad_matrix_location = find_env_dir("H5AD_MATRIX")
-    series_name = "Zheng_opc"
-    covariates = ["series"]
-    group_keys = ["condition"]
+    series_name = "macnair"
+    covariates = ["sample"]
+    group_keys = ["celltype"]
     file = os.path.join(h5ad_matrix_location, series_name + ".h5ad")
 
     # %% Preprocessing functions
@@ -91,16 +91,17 @@ if __name__ == "__main__":
     scvi.model.SCVI.setup_anndata(
         scvi_adata,
         # The primary batch info
-        batch_key="sample",
+        batch_key=covariates[0],
     )
     model = scvi.model.SCVI(scvi_adata, n_latent=50)
     model.train(
         accelerator="gpu",
+        precision="bf16-mixed",
         batch_size=SINGLE_CELL_VAE_BATCH_SIZE,
         datasplitter_kwargs=DataLoader,
         train_size=0.9,
         check_val_every_n_epoch=1,
-        max_epochs=500,
+        max_epochs=400,
         early_stopping=True,
     )
     plot.plot_validation_loss(model, series_name, file_info="model_validation_loss")
@@ -145,13 +146,9 @@ if __name__ == "__main__":
     # High resolution value results in more clusters
     print("Clustering with Leiden algorithm...")
     sc.tl.leiden(
-        filtered_adata, resolution=1.5, flavor="igraph", n_iterations=-1, directed=False
+        filtered_adata, resolution=3.5, flavor="igraph", n_iterations=-1, directed=False
     )
     plot.plot_umap(filtered_adata, series_name)
-
-    # Differential expression analysis is not performed on scVI denoised data because of imputation artifacts
-    # Instead, pseudobulk differential expression analysis using DESeq2 is performed
-    print("Differential expression analysis...")
 
     clustered_data_location = find_env_dir("CLUSTERED_DATA")
 
@@ -162,6 +159,9 @@ if __name__ == "__main__":
         )
     )
 
+    # Differential expression analysis is not performed on scVI denoised data because of imputation artifacts
+    # Instead, pseudobulk differential expression analysis using DESeq2 is performed
+    print("Differential expression analysis...")
     # %% Differential Expression Analysis using Pseudobulk DESeq2
     de_analysis_location = find_env_dir("DESEQ")
     de_result = pseudobulk_deseq2(filtered_adata, group_keys=group_keys, covariates=covariates)

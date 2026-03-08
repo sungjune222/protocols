@@ -13,7 +13,8 @@ PIXI_EXEC=$(command -v pixi)
 # ==========================================
 # Please set your parameters here
 # ==========================================
-PROJECT_ID="PRJNA544731"
+PROJECT_ID="PRJNA1108209"
+REFERENCE_GENOME="calJac240_pri"
 # ==========================================
 
 TOOL_PATH="$ROOT_DIR/.tools"
@@ -112,7 +113,7 @@ while IFS= read -r SRR_ID; do
         cd "$CELLRANGER_PROJECT_DIR" || exit
         
         cellranger count --id="$SRR_ID" \
-            --transcriptome="$ROOT_DIR/references/T2T_CHM13_v2_0" \
+            --transcriptome="$ROOT_DIR/references/$REFERENCE_GENOME" \
             --fastqs="$FASTQ_DATA_DIR/$SRR_ID" \
             --sample="$SRR_ID" \
             --localcores="$N_THREADS" \
