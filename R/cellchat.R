@@ -1,9 +1,9 @@
 run_cellchat <- function(
-  file,
+  h5ad_file,
   species, 
   group_key = "leiden",
   sample_key = "sample",
-  min_cells = 10,
+  min_cells = 10
 ) {
   if (missing(species)) {
     stop("Error: 'species' argument is required. Please specify 'mouse' or 'human'")
@@ -23,7 +23,7 @@ run_cellchat <- function(
     })
   )
 
-  base_name <- tools::file_path_sans_ext(file)
+  base_name <- tools::file_path_sans_ext(h5ad_file)
 
   data_dir <- get_env_dir("CLUSTERED_DATA")
   cellchat_dir <- get_env_dir("CELLCHAT")
@@ -31,7 +31,7 @@ run_cellchat <- function(
   dir.create(cellchat_dir, recursive = TRUE, showWarnings = FALSE)
 
   adata <- anndataR::read_h5ad(
-    file.path(data_dir, file),
+    file.path(data_dir, h5ad_file),
     as = "HDF5AnnData"
   )
 
@@ -91,7 +91,6 @@ run_cellchat <- function(
   # Summarize results into 2D group-by-group networks
   cellchat <- aggregateNet(cellchat)
 
-  base_name <- tools::file_path_sans_ext(file)
   saveRDS(cellchat, file = file.path(cellchat_dir, paste0(base_name, "_cellchat.rds")))
 
   return(cellchat)
