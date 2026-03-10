@@ -19,8 +19,12 @@ def pseudobulk_glmmseq_comp(
     random_effect_col: str, # column name for random effect (e.g., patient ID)
     covariates: Union[str, Iterable[str]] = [],
     filter_dict: dict = {},
-    min_cells: int = 30
+    min_cells: int = 30,
+    test_method: str = "Wald"
 ) -> pd.DataFrame:
+    if test_method not in {"Wald", "LRT"}:
+        raise ValueError("test_method must be either 'Wald' or 'LRT'")
+    
     group_keys = ["sample", condition_col]
     covariates = [covariates] if isinstance(covariates, str) else list(covariates)
     
@@ -97,20 +101,35 @@ def pseudobulk_glmmseq_comp(
         gene_chunks <- split(genes, cut(seq_along(genes), num_chunks, labels=FALSE))
         
         target_col <- paste0(condition_col, group_test)
+        target_term <- condition_col
+        
         clust <- makeCluster(num_chunks, type="PSOCK")
-        clusterExport(clust, c("countdata", "meta_df", "formula_str_glmm", "formula_str_reduced", "random_effect_col", 
-                               "robust_disp", "target_col", "size_factor"), envir=environment())
+        clusterExport(clust, c("countdata", "meta_df", "formula_str_glmm", "formula_str_reduced", 
+                                "random_effect_col", "robust_disp", "target_col", "target_term", 
+                                "size_factor", "test_method"), envir=environment())
         clusterEvalQ(clust, suppressPackageStartupMessages(library(glmmSeq)))
         
         res_list <- parLapply(clust, gene_chunks, function(g_chunk) {
             res <- data.frame(gene=g_chunk, coefs=NA_real_, se=NA_real_, pval=NA_real_, stringsAsFactors=FALSE)
             rownames(res) <- g_chunk
+
+            fit_args <- list(
+                modelFormula = as.formula(formula_str_glmm),
+                countdata = as.matrix(countdata[g_chunk, , drop=FALSE]),
+                metadata = meta_df,
+                id = random_effect_col,
+                dispersion = robust_disp[g_chunk],
+                sizeFactors = size_factor,
+                returnList = TRUE,
+                cores = 1,
+                progress = FALSE
+            )
+            if (test_method == "LRT") {
+                fit_args$reduced <- as.formula(formula_str_reduced)
+            }
             
             fit <- tryCatch({
-                glmmSeq(as.formula(formula_str_glmm), as.matrix(countdata[g_chunk, , drop=FALSE]),
-                        metadata = meta_df, id=random_effect_col, dispersion=robust_disp[g_chunk], 
-                        sizeFactors = size_factor, reduced = as.formula(formula_str_reduced), 
-                        returnList = TRUE, cores=1, progress=FALSE)
+                do.call(glmmSeq, fit_args)
             }, error = function(e) NULL)
             
             if (is.null(fit)) return(res)
@@ -127,10 +146,18 @@ def pseudobulk_glmmseq_comp(
                     res[one_gene, "se"] <- as.numeric(one_fit$stdErr[target_col])
                 } 
                 
-                if (!is.null(one_fit$chisq) && !is.null(one_fit$df) && 
-                    !is.na(one_fit$chisq[1]) && !is.na(one_fit$df[1])) {
-                    res[one_gene, "pval"] <- pchisq(one_fit$chisq[1], df=one_fit$df[1], lower.tail=FALSE) 
-                } 
+                if (test_method == "LRT") {
+                    if (!is.null(one_fit$chisq) && !is.null(one_fit$df) &&
+                        !is.na(one_fit$chisq[1]) && !is.na(one_fit$df[1])) {
+                        res[one_gene, "pval"] <- pchisq(one_fit$chisq[1], df=one_fit$df[1], lower.tail=FALSE)
+                    }
+                } else {
+                    term_idx <- which(names(one_fit$chisq) == target_term)
+                    if (length(term_idx) == 1 &&
+                        !is.na(one_fit$chisq[term_idx]) && !is.na(one_fit$df[term_idx])) {
+                        res[one_gene, "pval"] <- pchisq(one_fit$chisq[term_idx], df=one_fit$df[term_idx], lower.tail=FALSE)
+                    }
+                }
             } 
             return(res)
         })
@@ -178,6 +205,7 @@ def pseudobulk_glmmseq_comp(
         ro.globalenv['group_test'] = group_test
         ro.globalenv['random_effect_col'] = random_effect_col
         ro.globalenv['n_cores'] = CPU_CORE_COUNT
+        ro.globalenv['test_method'] = test_method
         
         ro.r(r_script)
         result_df = ro.globalenv['res_df']

@@ -120,6 +120,13 @@ build_cellranger_ref \
     "GCF_009914755.1_T2T-CHM13v2.0_genomic.gtf.gz" \
     "T2T_CHM13_v2_0"
 
+# Mus musculus (house mouse) GRCm39
+build_cellranger_ref \
+    "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/635/GCF_000001635.27_GRCm39" \
+    "GCF_000001635.27_GRCm39_genomic.fna.gz" \
+    "GCF_000001635.27_GRCm39_genomic.gtf.gz" \
+    "GRCm39"
+
 # Callithrix jacchus (white-tufted-ear marmoset) calJac240_pri
 build_cellranger_ref \
     "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/049/354/715/GCF_049354715.1_calJac240_pri" \

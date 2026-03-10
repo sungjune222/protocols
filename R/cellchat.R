@@ -1,80 +1,98 @@
-invisible(
-  suppressPackageStartupMessages({
-    library(anndataR)
-    library(CellChat)
-    library(Matrix)
-  })
-)
+run_cellchat <- function(
+  file,
+  species, 
+  group_key = "leiden",
+  sample_key = "sample",
+  min_cells = 10,
+) {
+  if (missing(species)) {
+    stop("Error: 'species' argument is required. Please specify 'mouse' or 'human'")
+  }
+  species <- match.arg(species, choices = c("mouse", "human")) 
+  if (species == "mouse") {
+    CellChatDB <- CellChatDB.mouse
+  } else {
+    CellChatDB <- CellChatDB.human
+  }
 
-series_name <- "SCP1038"
-clustered_data_dir <- get_env_dir("CLUSTERED_DATA")
-cellchat_dir <- get_env_dir("CELLCHAT")
-cellchat_dir <- file.path(cellchat_dir, series_name)
-dir.create(cellchat_dir, recursive = TRUE, showWarnings = FALSE)
+  invisible(
+    suppressPackageStartupMessages({
+      library(anndataR)
+      library(CellChat)
+      library(Matrix)
+    })
+  )
 
-adata <- anndataR::read_h5ad(
-  file.path(
-    clustered_data_dir,
-    paste0(series_name, "_clustered.h5ad")
-  ),
-  as = "HDF5AnnData"
-)
+  base_name <- tools::file_path_sans_ext(file)
 
-group_key <- "leiden"
-stopifnot(group_key %in% colnames(adata$obs))
+  data_dir <- get_env_dir("CLUSTERED_DATA")
+  cellchat_dir <- get_env_dir("CELLCHAT")
+  cellchat_dir <- file.path(cellchat_dir, base_name)
+  dir.create(cellchat_dir, recursive = TRUE, showWarnings = FALSE)
 
-provided_genes <- CellChat::extractGene(CellChatDB.mouse)
-genes_use <- intersect(provided_genes, adata$var_names)
-compact_adata <- adata[, genes_use]
+  adata <- anndataR::read_h5ad(
+    file.path(data_dir, file),
+    as = "HDF5AnnData"
+  )
 
-raw_counts <- compact_adata$X
-stopifnot(inherits(raw_counts, "dgRMatrix"))
+  stopifnot(group_key %in% colnames(adata$obs))
 
-cells <- compact_adata$obs_names
-genes <- compact_adata$var_names
+  provided_genes <- CellChat::extractGene(CellChatDB)
+  genes_use <- intersect(provided_genes, adata$var_names)
+  compact_adata <- adata[, genes_use]
 
-data_raw <- Matrix::t(raw_counts)
-rownames(data_raw) <- genes
-colnames(data_raw) <- cells
+  raw_counts <- compact_adata$X
+  stopifnot(inherits(raw_counts, "dgRMatrix"))
 
-meta_data <- data.frame(
-  group = paste0("cluster_", compact_adata$obs[[group_key]]),
-  row.names = cells,
-  samples = compact_adata$obs[["sample"]]
-)
+  cells <- compact_adata$obs_names
+  genes <- compact_adata$var_names
 
-data_input <- CellChat::normalizeData(
-  data_raw,
-  scale.factor = 10000, do.log = TRUE
-)
+  data_raw <- Matrix::t(raw_counts)
+  rownames(data_raw) <- genes
+  colnames(data_raw) <- cells
 
-cellchat <- CellChat::createCellChat(
-  object = data_input, meta = meta_data,
-  group.by = "group"
-)
+  meta_data <- data.frame(
+    group = paste0("cluster_", compact_adata$obs[[group_key]]),
+    row.names = cells,
+    samples = compact_adata$obs[[sample_key]]
+  )
 
-# Set the CellChatDB
-cellchat@DB <- CellChatDB.mouse
-# Keep only signaling genes present in the CellChat database
-cellchat <- subsetData(cellchat)
+  data_input <- CellChat::normalizeData(
+    data_raw,
+    scale.factor = 10000, do.log = TRUE
+  )
 
-# For parallel processing
-# This option must be inactivated if you have insufficient memory
-# future::plan("multisession", workers = 4)
-# options(future.globals.maxSize = Inf)
-# Identify signaling genes that are overexpressed in each cell group
-cellchat <- identifyOverExpressedGenes(cellchat)
-# Select overexpressed ligand–receptor interactions
-# based on the overexpressed genes and the CellChatDB
-cellchat <- identifyOverExpressedInteractions(cellchat)
+  cellchat <- CellChat::createCellChat(
+    object = data_input, meta = meta_data,
+    group.by = "group"
+  )
 
-# Compute ligand–receptor communication probabilities between all interactions
-cellchat <- computeCommunProb(cellchat)
-# Remove communications involving groups with too few cells
-cellchat <- filterCommunication(cellchat, min.cells = 10)
-# Aggregate L-R probabilities into pathway-level communication probabilities
-cellchat <- computeCommunProbPathway(cellchat)
-# Summarize results into 2D group-by-group networks
-cellchat <- aggregateNet(cellchat)
+  # Set the CellChatDB
+  cellchat@DB <- CellChatDB
+  # Keep only signaling genes present in the CellChat database
+  cellchat <- subsetData(cellchat)
 
-saveRDS(cellchat, file = file.path(cellchat_dir, "cellchat.rds"))
+  # For parallel processing
+  # This option must be inactivated if you have insufficient memory
+  # future::plan("multisession", workers = 4)
+  # options(future.globals.maxSize = Inf)
+  # Identify signaling genes that are overexpressed in each cell group
+  cellchat <- identifyOverExpressedGenes(cellchat)
+  # Select overexpressed ligand–receptor interactions
+  # based on the overexpressed genes and the CellChatDB
+  cellchat <- identifyOverExpressedInteractions(cellchat)
+
+  # Compute ligand–receptor communication probabilities between all interactions
+  cellchat <- computeCommunProb(cellchat)
+  # Remove communications involving groups with too few cells
+  cellchat <- filterCommunication(cellchat, min.cells = min_cells)
+  # Aggregate L-R probabilities into pathway-level communication probabilities
+  cellchat <- computeCommunProbPathway(cellchat)
+  # Summarize results into 2D group-by-group networks
+  cellchat <- aggregateNet(cellchat)
+
+  base_name <- tools::file_path_sans_ext(file)
+  saveRDS(cellchat, file = file.path(cellchat_dir, paste0(base_name, "_cellchat.rds")))
+
+  return(cellchat)
+}

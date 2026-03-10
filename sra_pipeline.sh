@@ -22,15 +22,12 @@ CELLRANGER_PATH=$(ls -d "$TOOL_PATH"/cellranger-* | head -n 1)
 export PATH="$CELLRANGER_PATH:$PATH"
 BAMTOFASTQ="$CELLRANGER_PATH/lib/bin/bamtofastq"
 
-FASTQ_DATA_DIR="$ROOT_DIR/$FASTQ_DATA"
-
 CELLRANGER_DIR="$ROOT_DIR/$CELLRANGER"
 CELLRANGER_PROJECT_DIR="$CELLRANGER_DIR/$PROJECT_ID"
 
 CELLBENDER_DIR="$ROOT_DIR/$CELLBENDER"
 CELLBENDER_PROJECT_DIR="$CELLBENDER_DIR/$PROJECT_ID"
 
-mkdir -p "$FASTQ_DATA_DIR"
 mkdir -p "$CELLRANGER_PROJECT_DIR"
 mkdir -p "$CELLBENDER_PROJECT_DIR"
 
@@ -98,23 +95,35 @@ while IFS= read -r SRR_ID; do
         echo "  -> Output directory exists. Skipping analysis."
     else
         echo "  -> Converting SRA to FastQ..."
-        mkdir -p "$FASTQ_DATA_DIR/$SRR_ID"
+        mkdir -p "$FASTQ_DATA/$SRR_ID"
         
         fasterq-dump "$SRA_FILE" \
             --split-files \
             --threads "$N_THREADS" \
-            --outdir "$FASTQ_DATA_DIR/$SRR_ID" \
-            --temp "$FASTQ_DATA_DIR/temp" > /dev/null 2>&1
+            --mem 30G \
+            --outdir "$FASTQ_DATA/$SRR_ID" \
+            --temp "$FASTQ_DATA/temp" > /dev/null 2>&1
 
-        mv "$FASTQ_DATA_DIR/$SRR_ID/${SRR_ID}_1.fastq" "$FASTQ_DATA_DIR/$SRR_ID/${SRR_ID}_S1_L001_R1_001.fastq"
-        mv "$FASTQ_DATA_DIR/$SRR_ID/${SRR_ID}_2.fastq" "$FASTQ_DATA_DIR/$SRR_ID/${SRR_ID}_S1_L001_R2_001.fastq"
+        if [ -f "$FASTQ_DATA/$SRR_ID/${SRR_ID}_2.fastq" ] && [ -f "$FASTQ_DATA/$SRR_ID/${SRR_ID}_3.fastq" ]; then
+            mv "$FASTQ_DATA/$SRR_ID/${SRR_ID}_2.fastq" "$FASTQ_DATA/$SRR_ID/${SRR_ID}_S1_L001_R1_001.fastq"
+            mv "$FASTQ_DATA/$SRR_ID/${SRR_ID}_3.fastq" "$FASTQ_DATA/$SRR_ID/${SRR_ID}_S1_L001_R2_001.fastq"
+            rm -f "$FASTQ_DATA/$SRR_ID/${SRR_ID}_1.fastq"
+
+        elif [ -f "$FASTQ_DATA/$SRR_ID/${SRR_ID}_1.fastq" ] && [ -f "$FASTQ_DATA/$SRR_ID/${SRR_ID}_2.fastq" ]; then
+            mv "$FASTQ_DATA/$SRR_ID/${SRR_ID}_1.fastq" "$FASTQ_DATA/$SRR_ID/${SRR_ID}_S1_L001_R1_001.fastq"
+            mv "$FASTQ_DATA/$SRR_ID/${SRR_ID}_2.fastq" "$FASTQ_DATA/$SRR_ID/${SRR_ID}_S1_L001_R2_001.fastq"
+            
+        else
+            echo "  Error: FastQ format is unrecognized for $SRR_ID."
+            exit 1
+        fi
 
         echo "  -> Running Cell Ranger..."
         cd "$CELLRANGER_PROJECT_DIR" || exit
         
         cellranger count --id="$SRR_ID" \
             --transcriptome="$ROOT_DIR/references/$REFERENCE_GENOME" \
-            --fastqs="$FASTQ_DATA_DIR/$SRR_ID" \
+            --fastqs="$FASTQ_DATA/$SRR_ID" \
             --sample="$SRR_ID" \
             --localcores="$N_THREADS" \
             --create-bam false > "$SRR_ID.log" 2>&1
@@ -127,7 +136,7 @@ while IFS= read -r SRR_ID; do
 
         if [ $EXIT_CODE -eq 0 ]; then
             echo "  -> Cell Ranger finished successfully. Cleaning up FASTQ..."
-            rm -rf "$FASTQ_DATA_DIR/$SRR_ID"
+            rm -rf "$FASTQ_DATA/$SRR_ID"
         else
             echo "  -> Warning: Cell Ranger failed. Keeping FASTQ"
         fi
@@ -135,6 +144,7 @@ while IFS= read -r SRR_ID; do
 
     ((count++))
 done < "$SRR_LIST"
+
 
 echo "=== [PART 3] Starting CellBender Denoising (Docker) ==="
 
@@ -246,6 +256,7 @@ except Exception:
     ((count++))
 done < "$SRR_LIST"
 
+
 echo "=== [PART 4] Starting COMPOSITE Doublet Detection ==="
 
 PYTHON_SCRIPT="$ROOT_DIR/pipeline/utils/doublet_composite.py"
@@ -310,6 +321,7 @@ while IFS= read -r SRR_ID; do
     
     ((count++))
 done < "$SRR_LIST"
+
 
 echo "=== [PART 5] Merging all clean .h5ad files ==="
 

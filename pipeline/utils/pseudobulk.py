@@ -47,7 +47,7 @@ def pseudobulk(
     )
 
     meta_df = pd.DataFrame(index=counts_df.index)
-    split = meta_df.index.to_series().str.split(sep, expand=True)
+    split = meta_df.index.astype(str).to_series().str.split(sep, expand=True)
     split.columns = keys
     for k in keys:
         meta_df[k] = split[k].values
