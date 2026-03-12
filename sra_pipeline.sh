@@ -70,6 +70,7 @@ if [ -s "$DOWNLOAD_INPUT_LIST" ]; then
     aria2c -i "$DOWNLOAD_INPUT_LIST" \
         -x 16 -s 16 -j 4 \
         --file-allocation=none \
+        --disk-cache=2048M \
         --summary-interval=0
 else
     echo "All files seem to be downloaded."
@@ -102,7 +103,7 @@ while IFS= read -r SRR_ID; do
             --threads "$N_THREADS" \
             --mem 30G \
             --outdir "$FASTQ_DATA/$SRR_ID" \
-            --temp "$FASTQ_DATA/temp" > /dev/null 2>&1
+            --temp "$FASTQ_DATA/temp" 
 
         if [ -f "$FASTQ_DATA/$SRR_ID/${SRR_ID}_2.fastq" ] && [ -f "$FASTQ_DATA/$SRR_ID/${SRR_ID}_3.fastq" ]; then
             mv "$FASTQ_DATA/$SRR_ID/${SRR_ID}_2.fastq" "$FASTQ_DATA/$SRR_ID/${SRR_ID}_S1_L001_R1_001.fastq"
