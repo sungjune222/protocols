@@ -1,33 +1,29 @@
 # %% Environment Setup
-import anndata
 import gc
-import gseapy as gp
 import os
 import numpy as np
 import pandas as pd
 import scanpy as sc
 import scvi
+import rapids_singlecell as rsc
 from anndata import AnnData
 from pipeline.utils import plot
 from pipeline.utils.env import find_env_dir
 from pipeline.config.constants import (
     SINGLE_CELL_VAE_BATCH_SIZE,
-    CPU_CORE_COUNT,
 )
 from pipeline.config.machine_learning import DataLoader
-from pipeline.utils.deseq2 import pseudobulk_deseq2
-
-anndata.settings.allow_write_nullable_strings = True
 
 if __name__ == "__main__":
-    # Loading .env
-    h5ad_matrix_location = find_env_dir("H5AD_MATRIX")
+    pre_h5ad_dir = find_env_dir("PRE_H5AD")
     series_name = "macnair"
-    covariates = ["sample"]
-    group_keys = ["celltype"]
-    file = os.path.join(h5ad_matrix_location, series_name + ".h5ad")
+    leiden_resolution = 3.5
+    file = os.path.join(pre_h5ad_dir, series_name + "_raw.h5ad")
 
-    # %% Preprocessing functions
+    # Preprocessing each sample
+    print("Loading data...")
+    loaded_adata = sc.read_h5ad(file)
+    rsc.get.anndata_to_GPU(loaded_adata)
 
     # Quality assessment by calculating QC metrics
     def quality_assess(adata: AnnData, ribo_genes: pd.DataFrame) -> AnnData:
@@ -39,59 +35,52 @@ if __name__ == "__main__":
 
         # Generates QC metrics
         # qc_vars: List of categories that you want to make as a QC metrics (It must be set as a boolean list in AnnData.obs)
-        sc.pp.calculate_qc_metrics(
-            adata, qc_vars=["mt", "ribo"], percent_top=[20], log1p=True, inplace=True
+        rsc.pp.calculate_qc_metrics(
+            adata, qc_vars=["mt", "ribo"], log1p=True,
         )
-
         return adata
 
     ribo_url = "http://software.broadinstitute.org/gsea/msigdb/download_geneset.jsp?geneSetName=KEGG_RIBOSOME&fileType=txt"
     ribo_genes = pd.read_table(ribo_url, skiprows=2, header=None)
 
-    # Preprocessing each sample
-    print("Loading data...")
-    loaded_adata = sc.read_h5ad(file)
-
     print("Assessing quality...")
     quality_assessed_adata = quality_assess(loaded_adata, ribo_genes)
 
     # Cell and gene filtering
-    sc.pp.filter_cells(quality_assessed_adata, min_genes=200)
-    sc.pp.filter_genes(quality_assessed_adata, min_cells=10)
+    rsc.pp.filter_cells(quality_assessed_adata, min_genes=200)
+    rsc.pp.filter_genes(quality_assessed_adata, min_cells=10)
     # Filtered cells and genes necessitate re-calculation of QC metrics
     quality_assessed_adata = quality_assess(quality_assessed_adata, ribo_genes)
 
     plot.plot_qc(quality_assessed_adata, series_name)
 
     # Cytoplasmic RNA in dead cells leaks out, resulting in a higher proportion of remaining mitochondrial RNA
-    quality_assessed_adata = quality_assessed_adata[
+    filtered_adata = quality_assessed_adata[
         (quality_assessed_adata.obs["pct_counts_mt"] < 15)
-    ].copy()
-
-    filtered_adata = quality_assessed_adata
+    ]
     gc.collect()
 
-    filtered_count_matrix_location = find_env_dir("FILTERED_COUNT_MATRIX")
+    filtered_h5ad_dir = find_env_dir("FILTERED_H5AD")
     filtered_adata.write_h5ad(
-        os.path.join(filtered_count_matrix_location, series_name + ".h5ad")
+        os.path.join(filtered_h5ad_dir, series_name + "_filtered.h5ad")
     )
 
     # %% Producing latent representation of cells using scVI
     print("Producing latent representation of cells using scVI...")
-
-    sc.pp.highly_variable_genes(
+    
+    rsc.pp.highly_variable_genes(
         filtered_adata,
         n_top_genes=4000,
-        subset=False,
         flavor="seurat_v3",
     )
     scvi_adata = filtered_adata[:, filtered_adata.var["highly_variable"]].copy()
+    rsc.get.anndata_to_CPU(scvi_adata)
 
     # Setting up AnnData for scVI model with batch effects
     scvi.model.SCVI.setup_anndata(
         scvi_adata,
         # The primary batch info
-        batch_key=covariates[0],
+        batch_key="sample",
     )
     model = scvi.model.SCVI(scvi_adata, n_latent=50)
     model.train(
@@ -100,7 +89,7 @@ if __name__ == "__main__":
         batch_size=SINGLE_CELL_VAE_BATCH_SIZE,
         datasplitter_kwargs=DataLoader,
         train_size=0.9,
-        check_val_every_n_epoch=1,
+        check_val_every_n_epoch=5,
         max_epochs=400,
         early_stopping=True,
     )
@@ -114,101 +103,49 @@ if __name__ == "__main__":
             "Cell names do not match between filtered_adata and scvi_adata"
         )
 
-    scvi_model_location = find_env_dir("SCVI_MODEL")
+    scvi_model_dir = find_env_dir("SCVI_MODEL")
     model.save(
-        os.path.join(scvi_model_location, series_name),
+        os.path.join(scvi_model_dir, series_name),
         overwrite=True,
         save_anndata=True,
     )
     del scvi_adata
     gc.collect()
 
-    compressed_count_matrix_location = find_env_dir("COMPRESSED_COUNT_MATRIX")
+    dimension_reduced_h5ad_dir = find_env_dir("DIMENSION_REDUCED_H5AD")
     filtered_adata.write_h5ad(
         os.path.join(
-            compressed_count_matrix_location,
-            series_name + "_compressed.h5ad",
+            dimension_reduced_h5ad_dir,
+            series_name + "_dimension_reduced.h5ad",
         )
     )
 
     # %% Clustering
+    rsc.get.anndata_to_GPU(filtered_adata)
+
     # Uses pre-calculated scVI latent representation for calculating similarity score and constructing neighborhood graph
     # Store settings in .uns["neighbors"] and connectivity matrices in .obsp
     print("Constructing neighborhood graph...")
-    sc.pp.neighbors(filtered_adata, n_neighbors=15, use_rep="X_scvi", metric="cosine")
+    rsc.pp.neighbors(filtered_adata, n_neighbors=15, use_rep="X_scvi", metric="cosine")
     # Embeds the neighborhood graph into 2D space using UMAP algorithm (optimized via SGD, Stochastic Gradient Descent)
     # You can change n_components to 3 for 3D UMAP
     print("Calculating UMAP...")
-    sc.tl.umap(filtered_adata, n_components=2, min_dist=0.3)
+    rsc.tl.umap(filtered_adata, n_components=2, min_dist=0.3)
     # If the clusters appear too clumped or merged, try decreasing n_neighbors and min_dist
 
     # Clustering cells using leiden algorithm, maximizes modularity which is defined based on its intergroup connectivity and expected (random) connectivity
     # High resolution value results in more clusters
     print("Clustering with Leiden algorithm...")
-    sc.tl.leiden(
-        filtered_adata, resolution=3.5, flavor="igraph", n_iterations=-1, directed=False
-    )
+    rsc.tl.leiden(filtered_adata, resolution=leiden_resolution)
     plot.plot_umap(filtered_adata, series_name)
 
-    clustered_data_location = find_env_dir("CLUSTERED_DATA")
+    clustered_h5ad_dir = find_env_dir("CLUSTERED_H5AD")
 
     filtered_adata.write_h5ad(
         os.path.join(
-            clustered_data_location,
-            series_name + "_clustered.h5ad",
+            clustered_h5ad_dir,
+            series_name + ".h5ad",
         )
     )
 
-    # Differential expression analysis is not performed on scVI denoised data because of imputation artifacts
-    # Instead, pseudobulk differential expression analysis using DESeq2 is performed
-    print("Differential expression analysis...")
-    # %% Differential Expression Analysis using Pseudobulk DESeq2
-    de_analysis_location = find_env_dir("DESEQ")
-    de_result = pseudobulk_deseq2(filtered_adata, group_keys=group_keys, covariates=covariates)
-    de_result.to_csv(os.path.join(de_analysis_location, series_name + "_deseq2.csv"))
-
-    # %% Gene Set Enrichment Analysis (GSEA)
-    def gsea(de_result: pd.DataFrame):
-        enrichment_analysis_location = find_env_dir("ENRICHMENT_ANALYSIS")
-        enrichment_analysis_location = os.path.join(
-            enrichment_analysis_location, series_name
-        )
-        os.makedirs(enrichment_analysis_location, exist_ok=True)
-
-        if "gene" in de_result.columns:
-            de_result = de_result.set_index("gene")
-
-        clean_de = de_result.replace([np.inf, -np.inf], np.nan).dropna(subset=["stat"])
-        clean_de.index = clean_de.index.astype(str).str.upper()
-
-        libraries = [
-            "GO_Biological_Process_2025",
-            "GO_Cellular_Component_2025",
-            "GO_Molecular_Function_2025",
-            "KEGG_2026",
-        ]
-
-        for (cluster, contrast), group_de in clean_de.groupby(["group", "contrast"]):
-            rank = group_de["stat"].sort_values(ascending=False).rename("score")
-
-            for lib in libraries:
-                prerank = gp.prerank(
-                    rnk=rank,
-                    gene_sets=lib,
-                    permutation_num=2000,
-                    min_size=10,
-                    max_size=500,
-                    seed=0,
-                    threads=CPU_CORE_COUNT,
-                    verbose=True,
-                )
-
-                assert prerank.res2d is not None
-                prerank.res2d.sort_values("FDR q-val").to_csv(
-                    os.path.join(
-                        enrichment_analysis_location,
-                        f"{series_name}_{cluster}vs{contrast}_{lib}.csv",
-                    )
-                )
-
-    gsea(de_result)
+    print("Clustering completed")

@@ -13,8 +13,8 @@ PIXI_EXEC=$(command -v pixi)
 # ==========================================
 # Please set your parameters here
 # ==========================================
-PROJECT_ID="PRJNA1108209"
-REFERENCE_GENOME="calJac240_pri"
+PROJECT_ID="PRJNA1108209" # PRJNA1298858
+REFERENCE_GENOME="calJac240_pri" #GRCm39
 # ==========================================
 
 TOOL_PATH="$ROOT_DIR/.tools"
@@ -101,9 +101,9 @@ while IFS= read -r SRR_ID; do
         fasterq-dump "$SRA_FILE" \
             --split-files \
             --threads "$N_THREADS" \
-            --mem 30G \
+            --mem 15G \
             --outdir "$FASTQ_DATA/$SRR_ID" \
-            --temp "$FASTQ_DATA/temp" 
+            --temp "$DUMP_DIR" 
 
         if [ -f "$FASTQ_DATA/$SRR_ID/${SRR_ID}_2.fastq" ] && [ -f "$FASTQ_DATA/$SRR_ID/${SRR_ID}_3.fastq" ]; then
             mv "$FASTQ_DATA/$SRR_ID/${SRR_ID}_2.fastq" "$FASTQ_DATA/$SRR_ID/${SRR_ID}_S1_L001_R1_001.fastq"
@@ -147,7 +147,7 @@ while IFS= read -r SRR_ID; do
 done < "$SRR_LIST"
 
 
-echo "=== [PART 3] Starting CellBender Denoising (Docker) ==="
+echo "=== [PART 3] Starting CellBender Denoising ==="
 
 DOCKER_DIR="$ROOT_DIR/docker"
 CB_DOCKERFILE="cellbender.Dockerfile"
@@ -176,6 +176,12 @@ function prepare_docker_image() {
 }
 prepare_docker_image "$CB_IMAGE_NAME" "$CB_DOCKERFILE"
 
+SUCCESS_SAMPLES_CSV="$CELLBENDER_PROJECT_DIR/success_samples.csv"
+CB_STATUS_CSV="$CELLBENDER_PROJECT_DIR/cellbender_status.csv"
+
+echo -e "SampleID,FilteredH5" > "$SUCCESS_SAMPLES_CSV"
+echo "SampleID,Status,Reason,ExpectedCells,TotalBarcodes,MeanReadsPerCell,MedianGenesPerCell,MedianUMIPerCell,OutputH5" > "$CB_STATUS_CSV"
+
 count=1
 while IFS= read -r SRR_ID; do
     echo "[Process: CellBender] $count / $TOTAL_COUNT : $SRR_ID"
@@ -185,56 +191,81 @@ while IFS= read -r SRR_ID; do
     METRICS_CSV="$CELLRANGER_OUTS/metrics_summary.csv"
 
     SAMPLE_CB_DIR="$CELLBENDER_PROJECT_DIR/$SRR_ID"
-    CB_OUTPUT_FILE="$SAMPLE_CB_DIR/$SRR_ID.h5"
+    CB_FILTERED_FILE="$SAMPLE_CB_DIR/${SRR_ID}_filtered.h5"
     mkdir -p "$SAMPLE_CB_DIR"
-
-    if [ ! -f "$INPUT_H5" ]; then
-        echo "  Warning: Input not found. Skipping."
+    
+    if [ -f "$CB_FILTERED_FILE" ]; then
+        echo "  -> Existing filtered output found. Reusing."
+        echo "$SRR_ID,$CB_FILTERED_FILE" >> "$SUCCESS_SAMPLES_CSV"
+        echo "$SRR_ID,REUSE_EXISTING,OK,N/A,N/A,N/A,N/A,N/A,$CB_FILTERED_FILE" >> "$CB_STATUS_CSV"
         ((count++)); continue
     fi
 
-    if [ -f "$CB_OUTPUT_FILE" ]; then
-        echo "  -> Output exists. Skipping."
+    if [ ! -f "$INPUT_H5" ]; then
+        echo "  Warning: Input not found. Skipping."
+        echo "$SRR_ID,SKIP,RAW_INPUT_MISSING,N/A,N/A,N/A,N/A,N/A," >> "$CB_STATUS_CSV"
         ((count++)); continue
     fi
 
     if [ ! -f "$METRICS_CSV" ]; then
-        echo "  Error: Critical file missing -> $METRICS_CSV"
-        echo "  Cannot determine expected cells. Exiting."
-        exit 1
+        echo "  Warning: metrics_summary.csv missing. Skipping."
+        echo "$SRR_ID,SKIP,METRICS_MISSING,N/A,N/A,N/A,N/A,N/A," >> "$CB_STATUS_CSV"
+        ((count++)); continue
     fi
 
-    REAL_CELLS=$("$PIXI_EXEC" run python3 -c "
+    METRICS=$("$PIXI_EXEC" run python3 - <<PY
 import csv
-import sys
 
-try:
-    with open('$METRICS_CSV', 'r') as f:
-        reader = csv.reader(f)
-        next(reader)
-        raw_val = next(reader)[0].replace(',', '')
-        print(raw_val)
-except Exception:
-    print('ERROR')
-")
+path = r"$METRICS_CSV"
+with open(path, "r", newline="") as f:
+    reader = csv.DictReader(f)
+    row = next(reader)
 
-    if [[ "$REAL_CELLS" =~ ^[0-9]+$ ]]; then
-        AUTO_EXPECTED_CELLS=$REAL_CELLS
-        echo "  -> Auto-detected Expected Cells: $AUTO_EXPECTED_CELLS"
-    else
-        echo "  Error: Failed to parse cell count from CSV (Got: '$REAL_CELLS')"
-        echo "  Exiting to prevent bad analysis."
-        exit 1
+def parse_intlike(x):
+    x = str(x).replace(",", "").strip()
+    if x == "":
+        return "NA"
+    try:
+        return str(int(float(x)))
+    except Exception:
+        return "NA"
+
+print("|".join([
+    parse_intlike(row.get("Estimated Number of Cells", "")),
+    parse_intlike(row.get("Mean Reads per Cell", "")),
+    parse_intlike(row.get("Median Genes per Cell", "")),
+    parse_intlike(row.get("Median UMI Counts per Cell", "")),
+]))
+PY
+)
+    IFS='|' read -r REAL_CELLS MEAN_READS MEDIAN_GENES MEDIAN_UMI <<< "$METRICS"
+
+    if ! [[ "$REAL_CELLS" =~ ^[0-9]+$ ]]; then
+        echo "  Warning: failed to parse metrics. Skipping."
+        echo "$SRR_ID,SKIP,METRICS_PARSE_FAILED,$REAL_CELLS,N/A,$MEAN_READS,$MEDIAN_GENES,$MEDIAN_UMI," >> "$CB_STATUS_CSV"
+        ((count++))
+        continue
     fi
 
-    AUTO_TOTAL_DROPLETS=$(( AUTO_EXPECTED_CELLS * 5 ))
+    TOTAL_BARCODES=$("$PIXI_EXEC" run python3 - <<PY
+import h5py
+with h5py.File(r"$INPUT_H5", "r") as f:
+    print(len(f["matrix"]["barcodes"]))
+PY
+)
+
+    AUTO_EXPECTED_CELLS="$REAL_CELLS"
+    AUTO_TOTAL_DROPLETS=$(( AUTO_EXPECTED_CELLS * 3 ))
     if [ "$AUTO_TOTAL_DROPLETS" -lt 15000 ]; then AUTO_TOTAL_DROPLETS=15000; fi
+    if [ "$AUTO_TOTAL_DROPLETS" -gt "$TOTAL_BARCODES" ]; then AUTO_TOTAL_DROPLETS="$TOTAL_BARCODES"; fi
     
-    echo "  -> Setting Total Droplets: $AUTO_TOTAL_DROPLETS"
-    docker run --rm --gpus all \
+    echo "  -> Metrics: expected_cells=$REAL_CELLS, mean_reads=$MEAN_READS, median_genes=$MEDIAN_GENES, median_umi=$MEDIAN_UMI, total_barcodes=$TOTAL_BARCODES"
+    echo "  -> Running CellBender with expected_cells=$AUTO_EXPECTED_CELLS total_droplets=$AUTO_TOTAL_DROPLETS"
+
+    if docker run --rm --gpus all \
         -v "$CELLRANGER_OUTS":/input:ro \
         -v "$SAMPLE_CB_DIR":/output \
-        -u $(id -u):$(id -g) \
+        -u "$(id -u):$(id -g)" \
         -e MPLCONFIGDIR=/tmp \
         -e HOME=/tmp \
         "$CB_IMAGE_NAME" \
@@ -242,16 +273,22 @@ except Exception:
         --input /input/raw_feature_bc_matrix.h5 \
         --output /output/$SRR_ID.h5 \
         --cuda \
-        --expected-cells $AUTO_EXPECTED_CELLS \
-        --total-droplets-included $AUTO_TOTAL_DROPLETS \
+        --expected-cells "$AUTO_EXPECTED_CELLS" \
+        --total-droplets-included "$AUTO_TOTAL_DROPLETS" \
         --fpr 0.01 \
         --epochs 150
-
-    if [ $? -eq 0 ]; then
-        echo "  -> Success."
+    then
+        if [ -f "$CB_FILTERED_FILE" ]; then
+            echo "  -> CellBender success."
+            echo "$SRR_ID,$CB_FILTERED_FILE" >> "$SUCCESS_SAMPLES_CSV"
+            echo "$SRR_ID,SUCCESS,OK,$AUTO_EXPECTED_CELLS,$TOTAL_BARCODES,$MEAN_READS,$MEDIAN_GENES,$MEDIAN_UMI,$CB_FILTERED_FILE" >> "$CB_STATUS_CSV"
+        else
+            echo "  -> CellBender finished but filtered output missing."
+            echo "$SRR_ID,EXCLUDE,FILTERED_OUTPUT_MISSING,$AUTO_EXPECTED_CELLS,$TOTAL_BARCODES,$MEAN_READS,$MEDIAN_GENES,$MEDIAN_UMI," >> "$CB_STATUS_CSV"
+        fi
     else
-        echo "  -> Failed."
-        exit 1
+        echo "  -> CellBender failed. Sample excluded."
+        echo "$SRR_ID,EXCLUDE,CELLBENDER_FAILED,$AUTO_EXPECTED_CELLS,$TOTAL_BARCODES,$MEAN_READS,$MEDIAN_GENES,$MEDIAN_UMI," >> "$CB_STATUS_CSV"
     fi
 
     ((count++))
@@ -270,12 +307,9 @@ mkdir -p "$SCCOMPOSITE_PROJECT_DIR"
 echo "SampleID,GOF_Score,Status,Note" > "$SUMMARY_CSV"
 
 count=1
-while IFS= read -r SRR_ID; do
+tail -n +2 "$SUCCESS_SAMPLES_CSV" | while IFS=',' read -r SRR_ID INPUT_TARGET; do
     echo "[Process: COMPOSITE] $count / $TOTAL_COUNT : $SRR_ID"
-    
-    CB_OUTPUT_DIR="$CELLBENDER_PROJECT_DIR/$SRR_ID"
-    INPUT_TARGET="$CB_OUTPUT_DIR/${SRR_ID}_filtered.h5"
-    
+
     SCCOMPOSITE_OUT="$SCCOMPOSITE_PROJECT_DIR/$SRR_ID"
     mkdir -p "$SCCOMPOSITE_OUT"
     
@@ -291,10 +325,8 @@ while IFS= read -r SRR_ID; do
         --sample_id "$SRR_ID" > "$SCCOMPOSITE_OUT/run.log" 2>&1
     
     PY_EXIT_CODE=$?
-    echo "RUN FINISHED"
 
     if [ $PY_EXIT_CODE -eq 0 ]; then
-        
         GOF_FILE="$SCCOMPOSITE_OUT/${SRR_ID}_gof_score.txt"
         
         if [ -f "$GOF_FILE" ]; then
@@ -302,6 +334,7 @@ while IFS= read -r SRR_ID; do
         else
             GOF_VAL="0"
         fi
+
         IS_GOOD_FIT=$(echo "$GOF_VAL >= 3.0" | bc -l)
         
         if [ "$IS_GOOD_FIT" -eq 1 ]; then
@@ -321,7 +354,7 @@ while IFS= read -r SRR_ID; do
     fi
     
     ((count++))
-done < "$SRR_LIST"
+done
 
 
 echo "=== [PART 5] Merging all clean .h5ad files ==="

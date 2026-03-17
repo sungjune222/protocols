@@ -1,7 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
+wget https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+rm cuda-keyring_1.1-1_all.deb
+rm cuda-keyring_1.1-1_all.deb.1
+
 sudo apt update
+sudo apt install -y cuda-toolkit-13-0
+
 sudo apt install -y docker.io
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
   && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \

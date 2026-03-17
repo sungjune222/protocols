@@ -4,55 +4,63 @@ from anndata import AnnData
 from typing import Iterable, Tuple
 from scipy.sparse import csr_matrix
 
-
 def pseudobulk(
     adata: AnnData,
     group_keys: Iterable[str],
     min_cells: int = 30,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    sep = "__"
     keys = list(group_keys)
-    for k in keys:
-        if k not in adata.obs.columns:
-            raise ValueError(f"Key '{k}' not found in adata.obs")
+    missing = [k for k in keys if k not in adata.obs.columns]
+    if missing:
+        raise ValueError(f"Keys not found in adata.obs: {missing}")
 
     assert isinstance(adata.obs, pd.DataFrame)
-    group_df = adata.obs[keys].astype(str)
-    group_id = group_df.apply(lambda row: sep.join(map(str, row.tolist())), axis=1)
+    group_df = adata.obs.loc[:, keys]
+    group_index = pd.MultiIndex.from_frame(group_df, names=keys)
+    codes, uniques = group_index.factorize(sort=False)
 
-    sizes = group_id.value_counts()
-    keep_groups = sizes[sizes >= min_cells].index
-    keep_mask = group_id.isin(keep_groups).to_numpy()
+    sizes = np.bincount(codes, minlength=len(uniques))
+    keep_group = sizes >= min_cells
+    keep_mask = keep_group[codes]
 
     assert isinstance(adata.X, csr_matrix)
     X = adata.X[keep_mask]
-    group_id = group_id[keep_mask]
-    group_df = group_df.loc[keep_mask]
+    codes = codes[keep_mask]
 
-    cat = pd.Categorical(group_id)
-    n_groups = len(cat.categories)
+    kept_old_codes = np.flatnonzero(keep_group)
+    remap = np.full(len(uniques), -1, dtype=np.int32)
+    remap[kept_old_codes] = np.arange(len(kept_old_codes), dtype=np.int32)
+    new_codes = remap[codes]
+    kept_uniques = uniques[kept_old_codes]
 
-    rows = np.arange(X.shape[0])
-    cols = cat.codes
+    n_groups = len(kept_old_codes)
+    n_cells = X.shape[0]
+
     G = csr_matrix(
-        (np.ones(X.shape[0], dtype=np.int8), (rows, cols)), shape=(X.shape[0], n_groups)
+        (
+            np.ones(n_cells, dtype=np.int8),
+            (new_codes, np.arange(n_cells, dtype=np.int64)),
+        ),
+        shape=(n_groups, n_cells),
+    )
+    pb = (G @ X).astype(np.int64, copy=False)
+
+    assert isinstance(kept_uniques, pd.MultiIndex)
+    meta_df = kept_uniques.to_frame(index=False)
+    
+    pseudobulk_id = pd.Index(
+        meta_df.astype(str).agg("_".join, axis=1),
+        name="pseudobulk_id",
     )
 
-    pb = (G.T @ X).astype(np.int64)
+    meta_df.index = pseudobulk_id
+    meta_df["n_cells"] = sizes[kept_old_codes]
+    meta_df["library_size"] = np.asarray(pb.sum(axis=1)).ravel()
 
-    counts_df = pd.DataFrame(
-        pb.toarray(),
-        index=pd.Index(cat.categories, name="pseudobulk_id"),
+    counts_df = pd.DataFrame.sparse.from_spmatrix(
+        pb,
+        index=pseudobulk_id,
         columns=adata.var_names,
     )
-
-    meta_df = pd.DataFrame(index=counts_df.index)
-    split = meta_df.index.astype(str).to_series().str.split(sep, expand=True)
-    split.columns = keys
-    for k in keys:
-        meta_df[k] = split[k].values
-
-    meta_df["n_cells"] = sizes.loc[meta_df.index].values
-    meta_df["library_size"] = counts_df.sum(axis=1).values
 
     return counts_df, meta_df

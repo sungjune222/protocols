@@ -14,13 +14,13 @@ import scvi
 import seaborn as sns
 import warnings
 from anndata import AnnData
-from scipy.sparse import issparse, csr_matrix
+from scipy.sparse import csr_matrix
 from typing import List, Dict, Any, Optional
 from pipeline.utils.env import find_env_dir
 from pipeline.utils.pseudobulk import pseudobulk
+from pipeline.config.constants import FIG_FORMAT
 
 warnings.filterwarnings("ignore", message="Tight layout not applied")
-
 
 # Plots validation loss over training epochs
 def plot_validation_loss(
@@ -49,15 +49,15 @@ def plot_validation_loss(
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(
-        os.path.join(validation_loss_plots_dir, f"{series_name}_{file_info}.svg"),
-        format="svg",
+        os.path.join(validation_loss_plots_dir, f"{series_name}_{file_info}.{FIG_FORMAT}"),
+        format=FIG_FORMAT,
         bbox_inches="tight",
     )
     plt.close()
 
 
 # %% Visualizes sample quality metrics across multiple samples
-def plot_qc(adata: AnnData, series_name: str) -> None:
+def plot_qc(adata: AnnData, series_name: str, max_cells_per_sample: int = 5000) -> None:
     qc_ridgeplots_dir = find_env_dir("QC_RIDGEPLOTS")
     qc_ridgeplots_dir = os.path.join(qc_ridgeplots_dir, series_name)
     os.makedirs(
@@ -66,18 +66,27 @@ def plot_qc(adata: AnnData, series_name: str) -> None:
     )
 
     assert isinstance(adata.obs, pd.DataFrame)
-    sample_quality = adata.obs.sort_values("sample")
+    rng = np.random.default_rng(0)
+    sample_quality = adata.obs.sort_values("sample").copy()
+    sample_quality["rand"] = rng.random(len(sample_quality))
+
+    sample_quality = (
+        sample_quality
+        .sort_values(["sample", "rand"])
+        .groupby("sample", group_keys=False, observed=True)
+        .head(max_cells_per_sample)
+        .drop(columns="rand")
+        .reset_index(drop=True)
+    )
 
     variables = [
         "pct_counts_mt",
         "n_genes_by_counts",
-        "pct_counts_in_top_20_genes",
         "log1p_total_counts",
     ]
     pretty_names = {
         "pct_counts_mt": "Mitochondrial Fraction (%)",
         "n_genes_by_counts": "Detected Genes",
-        "pct_counts_in_top_20_genes": "Library Complexity (Top 20%)",
         "log1p_total_counts": "Sequencing Depth (Log1p UMI)",
     }
 
@@ -95,25 +104,20 @@ def plot_qc(adata: AnnData, series_name: str) -> None:
             palette="tab20",
             sharex=True,
         )
+
         # Draw KDE (Kernel Density Estimation) plot
-        sns_grid.map(
+        sns_grid.map_dataframe(
             sns.kdeplot,
-            variable,
+            x=variable,
             clip_on=False,
             fill=True,
             alpha=0.8,
             linewidth=1.5,
             warn_singular=False,
+            bw_adjust=0.8,
+            cut=0,
         )
-        # Outlining the KDE plot with white line
-        sns_grid.map(
-            sns.kdeplot,
-            variable,
-            clip_on=False,
-            color="w",
-            linewidth=2,
-            warn_singular=False,
-        )
+
         # Depicting a y axis
         sns_grid.map(plt.axhline, y=0, linewidth=2, clip_on=False)
 
@@ -194,9 +198,9 @@ def plot_qc(adata: AnnData, series_name: str) -> None:
 
         filename = os.path.join(
             qc_ridgeplots_dir,
-            f"{variable}.svg",
+            f"{variable}.{FIG_FORMAT}",
         )
-        plt.savefig(filename, format="svg", bbox_inches="tight")
+        plt.savefig(filename, format=FIG_FORMAT, bbox_inches="tight")
         plt.close()
     sns.reset_defaults()
 
@@ -296,28 +300,34 @@ def plot_umap(
         if legend:
             legend.set_frame_on(False)
 
-        filename = f"umap_{config['title']}.svg"
+        filename = f"umap_{config['title']}.{FIG_FORMAT}"
         save_path = os.path.join(umap_plots_dir, filename)
-        plt.savefig(save_path, format="svg", bbox_inches="tight")
+        plt.savefig(save_path, format=FIG_FORMAT, bbox_inches="tight")
 
         plt.close(fig)
 
 
 def plot_dotplot(
     adata: AnnData, series_name: str, target_genes_dict: Dict[str, List[str]], group: str, 
-    filter_dict: dict = {},
+    filter_dict: Optional[dict] = None,
     project: Optional[str] = None,
     is_pseudobulk: bool = False,
 ) -> None:
+    if filter_dict is None:
+        filter_dict = {}
+
     dotplots_dir = find_env_dir("DOTPLOTS")
     if is_pseudobulk:
         series_name = series_name + "_pseudobulk"
+
     suffix = "_".join(target_genes_dict.keys())
     if filter_dict:
         flattened = [item for sublist in filter_dict.values() for item in sublist]
         suffix = "_".join(flattened) + "_" + suffix
+
     if project is not None:
         dotplots_dir = os.path.join(dotplots_dir, project)
+
     dotplots_dir = os.path.join(dotplots_dir, "_".join([series_name, suffix]))
     os.makedirs(
         dotplots_dir,
@@ -331,7 +341,7 @@ def plot_dotplot(
         
         if isinstance(values, str):
             values = [values]
-        mask = mask & adata.obs[col].isin(values)
+        mask &= adata.obs[col].isin(values)
     adata = adata[mask]
 
     all_target_genes = []
@@ -399,9 +409,7 @@ def plot_dotplot(
         use_raw=False,
         var_group_rotation=0,
     )
-
-    filename = "Var_dotplot.svg"
-    plt.savefig(os.path.join(dotplots_dir, filename), format="svg", bbox_inches="tight")
+    plt.savefig(os.path.join(dotplots_dir, f"Var_dotplot.{FIG_FORMAT}"), format=FIG_FORMAT, bbox_inches="tight")
 
     sc.pl.dotplot(
         core_adata,
@@ -412,10 +420,7 @@ def plot_dotplot(
         use_raw=False,
         var_group_rotation=0,
     )
-
-    suffix = "_".join(target_genes_dict.keys())
-    filename = "None_dotplot.svg"
-    plt.savefig(os.path.join(dotplots_dir, filename), format="svg", bbox_inches="tight")
+    plt.savefig(os.path.join(dotplots_dir, f"None_dotplot.{FIG_FORMAT}"), format=FIG_FORMAT, bbox_inches="tight")
     plt.close()
 
 
@@ -445,9 +450,9 @@ def plot_violin(adata: AnnData, gene: str) -> None:
     )
     ax.set_ylim((0, 100))
 
-    filename = f"{series_name}_{gene}_violin.svg"
+    filename = f"{series_name}_{gene}_violin.{FIG_FORMAT}"
     fig.savefig(
-        os.path.join(violin_plots_dir, filename), format="svg", bbox_inches="tight"
+        os.path.join(violin_plots_dir, filename), format=FIG_FORMAT, bbox_inches="tight"
     )
     plt.close()
 
@@ -490,8 +495,8 @@ def plot_proportions(
     )
 
     plt.tight_layout()
-    filename = f"proportion_{group_key}_by_{sample_key}.svg"
+    filename = f"proportion_{group_key}_by_{sample_key}.{FIG_FORMAT}"
     fig.savefig(
-        os.path.join(proportions_plots_dir, filename), format="svg", bbox_inches="tight"
+        os.path.join(proportions_plots_dir, filename), format=FIG_FORMAT, bbox_inches="tight"
     )
     plt.close()
