@@ -1,4 +1,3 @@
-import anndata
 import argparse
 import contextlib
 import io
@@ -9,8 +8,6 @@ import scanpy as sc
 import scipy.io
 from scipy.sparse import csr_matrix
 from sccomposite import RNA_modality
-
-anndata.settings.allow_write_nullable_strings = True
 
 class Args(argparse.Namespace):
     input: str

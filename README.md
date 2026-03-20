@@ -26,7 +26,7 @@ chmod +x ./install.sh
 # Paste Cell Ranger download URL and press Enter when requested
 
 # 5) install R dependencies (You must use --vanilla to avoid errors)
-Rscript --vanilla R/install.R
+pixi run Rscript --vanilla R/install.R
 exit
 
 # 6) update R dependencies

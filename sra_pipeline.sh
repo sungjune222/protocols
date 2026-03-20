@@ -13,21 +13,16 @@ PIXI_EXEC=$(command -v pixi)
 # ==========================================
 # Please set your parameters here
 # ==========================================
-PROJECT_ID="PRJNA1108209" # PRJNA1298858
-REFERENCE_GENOME="calJac240_pri" #GRCm39
+PROJECT_ID="PRJNA1287730" 
+REFERENCE_GENOME="T2T_CHM13_v2_0"
 # ==========================================
 
 TOOL_PATH="$ROOT_DIR/.tools"
 CELLRANGER_PATH=$(ls -d "$TOOL_PATH"/cellranger-* | head -n 1)
 export PATH="$CELLRANGER_PATH:$PATH"
-BAMTOFASTQ="$CELLRANGER_PATH/lib/bin/bamtofastq"
 
-CELLRANGER_DIR="$ROOT_DIR/$CELLRANGER"
-CELLRANGER_PROJECT_DIR="$CELLRANGER_DIR/$PROJECT_ID"
-
-CELLBENDER_DIR="$ROOT_DIR/$CELLBENDER"
-CELLBENDER_PROJECT_DIR="$CELLBENDER_DIR/$PROJECT_ID"
-
+CELLRANGER_PROJECT_DIR="$ROOT_DIR/$CELLRANGER/$PROJECT_ID"
+CELLBENDER_PROJECT_DIR="$ROOT_DIR/$CELLBENDER/$PROJECT_ID"
 mkdir -p "$CELLRANGER_PROJECT_DIR"
 mkdir -p "$CELLBENDER_PROJECT_DIR"
 
@@ -38,11 +33,14 @@ SRA_META_DIR="$SRA_PROJECT_DIR/_meta"
 mkdir -p "$SRA_META_DIR"
 
 RUNINFO_CSV="$SRA_META_DIR/runinfo.csv"
+SRA_XML="$SRA_META_DIR/sra_metadata.xml"
 SRR_LIST="$SRA_META_DIR/srr_list.txt"
 SRR_URL_MAP="$SRA_META_DIR/srr_url_map.txt"
 DOWNLOAD_INPUT_LIST="$SRA_META_DIR/download_input_list.txt"
 
 esearch -db sra -query "$PROJECT_ID" | efetch -format runinfo > "$RUNINFO_CSV"
+esearch -db sra -query "$PROJECT_ID" | efetch -format xml > "$SRA_XML"
+
 cut -d',' -f1 "$RUNINFO_CSV" | tail -n +2 > "$SRR_LIST"
 awk -F',' 'NR>1 {print $1 "\t" $10}' "$RUNINFO_CSV" > "$SRR_URL_MAP"
 
@@ -86,7 +84,7 @@ while IFS= read -r SRR_ID; do
 
     if [ ! -f "$SRA_FILE" ]; then
         echo "  Error: SRA file not found at $SRA_FILE. Skipping."
-        ((count++))
+        count=$((count + 1))
         continue
     fi
 
@@ -143,7 +141,7 @@ while IFS= read -r SRR_ID; do
         fi
     fi
 
-    ((count++))
+    count=$((count + 1))
 done < "$SRR_LIST"
 
 
@@ -198,19 +196,19 @@ while IFS= read -r SRR_ID; do
         echo "  -> Existing filtered output found. Reusing."
         echo "$SRR_ID,$CB_FILTERED_FILE" >> "$SUCCESS_SAMPLES_CSV"
         echo "$SRR_ID,REUSE_EXISTING,OK,N/A,N/A,N/A,N/A,N/A,$CB_FILTERED_FILE" >> "$CB_STATUS_CSV"
-        ((count++)); continue
+        count=$((count + 1)); continue
     fi
 
     if [ ! -f "$INPUT_H5" ]; then
         echo "  Warning: Input not found. Skipping."
         echo "$SRR_ID,SKIP,RAW_INPUT_MISSING,N/A,N/A,N/A,N/A,N/A," >> "$CB_STATUS_CSV"
-        ((count++)); continue
+        count=$((count + 1)); continue
     fi
 
     if [ ! -f "$METRICS_CSV" ]; then
         echo "  Warning: metrics_summary.csv missing. Skipping."
         echo "$SRR_ID,SKIP,METRICS_MISSING,N/A,N/A,N/A,N/A,N/A," >> "$CB_STATUS_CSV"
-        ((count++)); continue
+        count=$((count + 1)); continue
     fi
 
     METRICS=$("$PIXI_EXEC" run python3 - <<PY
@@ -243,7 +241,7 @@ PY
     if ! [[ "$REAL_CELLS" =~ ^[0-9]+$ ]]; then
         echo "  Warning: failed to parse metrics. Skipping."
         echo "$SRR_ID,SKIP,METRICS_PARSE_FAILED,$REAL_CELLS,N/A,$MEAN_READS,$MEDIAN_GENES,$MEDIAN_UMI," >> "$CB_STATUS_CSV"
-        ((count++))
+        count=$((count + 1))
         continue
     fi
 
@@ -291,13 +289,13 @@ PY
         echo "$SRR_ID,EXCLUDE,CELLBENDER_FAILED,$AUTO_EXPECTED_CELLS,$TOTAL_BARCODES,$MEAN_READS,$MEDIAN_GENES,$MEDIAN_UMI," >> "$CB_STATUS_CSV"
     fi
 
-    ((count++))
+    count=$((count + 1))
 done < "$SRR_LIST"
 
 
 echo "=== [PART 4] Starting COMPOSITE Doublet Detection ==="
 
-PYTHON_SCRIPT="$ROOT_DIR/pipeline/utils/doublet_composite.py"
+PYTHON_SCRIPT="$ROOT_DIR/pipeline/utils/sccomposite.py"
 SCCOMPOSITE_DIR="$ROOT_DIR/$SCCOMPOSITE"
 SCCOMPOSITE_PROJECT_DIR="$SCCOMPOSITE_DIR/$PROJECT_ID"
 SUMMARY_CSV="$SCCOMPOSITE_PROJECT_DIR/summary_gof.csv"
@@ -316,7 +314,7 @@ tail -n +2 "$SUCCESS_SAMPLES_CSV" | while IFS=',' read -r SRR_ID INPUT_TARGET; d
     if [ ! -f "$INPUT_TARGET" ]; then
         echo "  Warning: Input ($INPUT_TARGET) not found. Skipping."
         echo "$SRR_ID,N/A,MISSING_INPUT,Input H5 not found" >> "$SUMMARY_CSV"
-        ((count++)); continue
+        count=$((count + 1)); continue
     fi
 
     "$PIXI_EXEC" run python3 "$PYTHON_SCRIPT" \
@@ -353,19 +351,20 @@ tail -n +2 "$SUCCESS_SAMPLES_CSV" | while IFS=',' read -r SRR_ID INPUT_TARGET; d
         echo "$SRR_ID,N/A,FAILED,Script Error" >> "$SUMMARY_CSV"
     fi
     
-    ((count++))
+    count=$((count + 1))
 done
 
 
 echo "=== [PART 5] Merging all clean .h5ad files ==="
 
 MERGE_SCRIPT="$ROOT_DIR/pipeline/utils/merge_h5ad.py"
-H5AD_MATRIX_DIR="$ROOT_DIR/$H5AD_MATRIX"
+H5AD_MATRIX_DIR="$ROOT_DIR/$MERGED_H5AD"
 
 "$PIXI_EXEC" run python3 "$MERGE_SCRIPT" \
     --input_dir "$SCCOMPOSITE_PROJECT_DIR" \
     --project_id "$PROJECT_ID" \
-    --output_dir "$H5AD_MATRIX_DIR"
+    --output_dir "$H5AD_MATRIX_DIR" \
+    --sra_xml "$SRA_XML"
 
 MERGE_EXIT_CODE=$?
 if [ $MERGE_EXIT_CODE -eq 0 ]; then

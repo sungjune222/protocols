@@ -7,6 +7,7 @@ import scanpy as sc
 import scvi
 import rapids_singlecell as rsc
 from anndata import AnnData
+from scipy.sparse import csr_matrix
 from pipeline.utils import plot
 from pipeline.utils.env import find_env_dir
 from pipeline.config.constants import (
@@ -16,13 +17,16 @@ from pipeline.config.machine_learning import DataLoader
 
 if __name__ == "__main__":
     pre_h5ad_dir = find_env_dir("PRE_H5AD")
-    series_name = "macnair"
+    series_name = "lin"
     leiden_resolution = 3.5
     file = os.path.join(pre_h5ad_dir, series_name + "_raw.h5ad")
 
     # Preprocessing each sample
     print("Loading data...")
     loaded_adata = sc.read_h5ad(file)
+    
+    assert isinstance(loaded_adata.X, csr_matrix)
+    loaded_adata.X = loaded_adata.X.astype(np.float32)
     rsc.get.anndata_to_GPU(loaded_adata)
 
     # Quality assessment by calculating QC metrics
