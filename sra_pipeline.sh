@@ -23,8 +23,11 @@ export PATH="$CELLRANGER_PATH:$PATH"
 
 CELLRANGER_PROJECT_DIR="$ROOT_DIR/$CELLRANGER/$PROJECT_ID"
 CELLBENDER_PROJECT_DIR="$ROOT_DIR/$CELLBENDER/$PROJECT_ID"
+SCDBLFINDER_PROJECT_DIR="$ROOT_DIR/$SCDBLFINDER/$PROJECT_ID"
 mkdir -p "$CELLRANGER_PROJECT_DIR"
 mkdir -p "$CELLBENDER_PROJECT_DIR"
+mkdir -p "$SCDBLFINDER_PROJECT_DIR"
+
 
 echo "=== [PART 1] Detecting Project Type and Download ==="
 
@@ -293,65 +296,48 @@ PY
 done < "$SRR_LIST"
 
 
-echo "=== [PART 4] Starting COMPOSITE Doublet Detection ==="
+echo "=== [PART 4] Starting scDblFinder Doublet Detection ==="
 
-PYTHON_SCRIPT="$ROOT_DIR/pipeline/utils/sccomposite.py"
-SCCOMPOSITE_DIR="$ROOT_DIR/$SCCOMPOSITE"
-SCCOMPOSITE_PROJECT_DIR="$SCCOMPOSITE_DIR/$PROJECT_ID"
-SUMMARY_CSV="$SCCOMPOSITE_PROJECT_DIR/summary_gof.csv"
+SUMMARY_CSV="$SCDBLFINDER_PROJECT_DIR/summary_scdblfinder.csv"
+mkdir -p "$SCDBLFINDER_PROJECT_DIR"
 
-mkdir -p "$SCCOMPOSITE_PROJECT_DIR"
+SCDBLFINDER_R_SCRIPT="$ROOT_DIR/R/scdblfinder.R"
+SCDBLFINDER_PYTHON_SCRIPT="$ROOT_DIR/pipeline/utils/scdblfinder.py"
 
-echo "SampleID,GOF_Score,Status,Note" > "$SUMMARY_CSV"
+"$PIXI_EXEC" run Rscript "$SCDBLFINDER_R_SCRIPT" \
+    --manifest "$SUCCESS_SAMPLES_CSV" \
+    --outdir "$SCDBLFINDER_PROJECT_DIR" \
+    --threads 3 \
+    --dbr_per1k 0.008 \
+    --seed 1
 
-count=1
-tail -n +2 "$SUCCESS_SAMPLES_CSV" | while IFS=',' read -r SRR_ID INPUT_TARGET; do
-    echo "[Process: COMPOSITE] $count / $TOTAL_COUNT : $SRR_ID"
+while IFS=, read -r SRR_ID INPUT_TARGET || [[ -n "${SRR_ID:-}" ]]; do
+    [[ -z "${SRR_ID:-}" || "$SRR_ID" == "SampleID" ]] && continue
 
-    SCCOMPOSITE_OUT="$SCCOMPOSITE_PROJECT_DIR/$SRR_ID"
-    mkdir -p "$SCCOMPOSITE_OUT"
-    
-    if [ ! -f "$INPUT_TARGET" ]; then
-        echo "  Warning: Input ($INPUT_TARGET) not found. Skipping."
-        echo "$SRR_ID,N/A,MISSING_INPUT,Input H5 not found" >> "$SUMMARY_CSV"
-        count=$((count + 1)); continue
+    OUTDIR="$SCDBLFINDER_PROJECT_DIR/$SRR_ID"
+    SINGLET_CSV="$OUTDIR/${SRR_ID}_singlet_barcodes.csv"
+
+    if [[ ! -f "$INPUT_TARGET" ]]; then
+        echo "  -> Skip $SRR_ID: input missing"
+        continue
     fi
 
-    "$PIXI_EXEC" run python3 "$PYTHON_SCRIPT" \
+    if [[ ! -f "$SINGLET_CSV" ]]; then
+        echo "  -> Skip $SRR_ID: singlet barcode file missing"
+        continue
+    fi
+
+    "$PIXI_EXEC" run python3 "$SCDBLFINDER_PYTHON_SCRIPT" \
         --input "$INPUT_TARGET" \
-        --outdir "$SCCOMPOSITE_OUT" \
-        --sample_id "$SRR_ID" > "$SCCOMPOSITE_OUT/run.log" 2>&1
-    
-    PY_EXIT_CODE=$?
+        --singlets "$SINGLET_CSV" \
+        --outdir "$OUTDIR" \
+        --sample_id "$SRR_ID"
+done < "$SUCCESS_SAMPLES_CSV"
 
-    if [ $PY_EXIT_CODE -eq 0 ]; then
-        GOF_FILE="$SCCOMPOSITE_OUT/${SRR_ID}_gof_score.txt"
-        
-        if [ -f "$GOF_FILE" ]; then
-            GOF_VAL=$(cat "$GOF_FILE")
-        else
-            GOF_VAL="0"
-        fi
+echo "SampleID,TotalCells,RemovedZeroCountCells,PredictedDoublets,PredictedSinglets,ObservedDoubletFraction,ExpectedDoubletFraction,dbr_per1k,scDblFinderVersion,Status,Note" > "$SUMMARY_CSV"
 
-        IS_GOOD_FIT=$(echo "$GOF_VAL >= 3.0" | bc -l)
-        
-        if [ "$IS_GOOD_FIT" -eq 1 ]; then
-            STATUS="PASS"
-            NOTE="Reliable"
-        else
-            STATUS="WARNING"
-            NOTE="Low GOF (<3.0)"
-        fi
-        
-        echo "  -> Success. GOF: $GOF_VAL ($STATUS)"
-        echo "$SRR_ID,$GOF_VAL,$STATUS,$NOTE" >> "$SUMMARY_CSV"
-        
-    else
-        echo "  -> Error. Check logs at $SCCOMPOSITE_OUT/run.log"
-        echo "$SRR_ID,N/A,FAILED,Script Error" >> "$SUMMARY_CSV"
-    fi
-    
-    count=$((count + 1))
+for f in "$SCDBLFINDER_PROJECT_DIR"/*/*_summary.csv; do
+    [[ -f "$f" ]] && tail -n +2 "$f" >> "$SUMMARY_CSV"
 done
 
 
@@ -361,7 +347,7 @@ MERGE_SCRIPT="$ROOT_DIR/pipeline/utils/merge_h5ad.py"
 H5AD_MATRIX_DIR="$ROOT_DIR/$MERGED_H5AD"
 
 "$PIXI_EXEC" run python3 "$MERGE_SCRIPT" \
-    --input_dir "$SCCOMPOSITE_PROJECT_DIR" \
+    --input_dir "$SCDBLFINDER_PROJECT_DIR" \
     --project_id "$PROJECT_ID" \
     --output_dir "$H5AD_MATRIX_DIR" \
     --sra_xml "$SRA_XML"

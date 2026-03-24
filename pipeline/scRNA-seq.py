@@ -1,4 +1,3 @@
-# %% Environment Setup
 import gc
 import os
 import numpy as np
@@ -17,9 +16,9 @@ from pipeline.config.machine_learning import DataLoader
 
 if __name__ == "__main__":
     pre_h5ad_dir = find_env_dir("PRE_H5AD")
-    series_name = "lin"
+    SERIES_NAME = "lin"
     leiden_resolution = 3.5
-    file = os.path.join(pre_h5ad_dir, series_name + "_raw.h5ad")
+    file = os.path.join(pre_h5ad_dir, SERIES_NAME + "_raw.h5ad")
 
     # Preprocessing each sample
     print("Loading data...")
@@ -37,7 +36,6 @@ if __name__ == "__main__":
         adata.var["mt"] = np.asarray(mt_mask, dtype=bool)
         adata.var["ribo"] = np.asarray(ribo_mask, dtype=bool)
 
-        # Generates QC metrics
         # qc_vars: List of categories that you want to make as a QC metrics (It must be set as a boolean list in AnnData.obs)
         rsc.pp.calculate_qc_metrics(
             adata, qc_vars=["mt", "ribo"], log1p=True,
@@ -56,17 +54,17 @@ if __name__ == "__main__":
     # Filtered cells and genes necessitate re-calculation of QC metrics
     quality_assessed_adata = quality_assess(quality_assessed_adata, ribo_genes)
 
-    plot.plot_qc(quality_assessed_adata, series_name)
+    plot.plot_qc(quality_assessed_adata, SERIES_NAME)
 
     # Cytoplasmic RNA in dead cells leaks out, resulting in a higher proportion of remaining mitochondrial RNA
     filtered_adata = quality_assessed_adata[
         (quality_assessed_adata.obs["pct_counts_mt"] < 15)
-    ]
+    ].copy()
     gc.collect()
 
     filtered_h5ad_dir = find_env_dir("FILTERED_H5AD")
     filtered_adata.write_h5ad(
-        os.path.join(filtered_h5ad_dir, series_name + "_filtered.h5ad")
+        os.path.join(filtered_h5ad_dir, SERIES_NAME + "_filtered.h5ad")
     )
 
     # %% Producing latent representation of cells using scVI
@@ -97,7 +95,7 @@ if __name__ == "__main__":
         max_epochs=400,
         early_stopping=True,
     )
-    plot.plot_validation_loss(model, series_name, file_info="model_validation_loss")
+    plot.plot_validation_loss(model, SERIES_NAME, file_info="model_validation_loss")
 
     # latent_representation: (cell, latent_space_dimension)
     if filtered_adata.obs_names.equals(scvi_adata.obs_names):
@@ -109,7 +107,7 @@ if __name__ == "__main__":
 
     scvi_model_dir = find_env_dir("SCVI_MODEL")
     model.save(
-        os.path.join(scvi_model_dir, series_name),
+        os.path.join(scvi_model_dir, SERIES_NAME),
         overwrite=True,
         save_anndata=True,
     )
@@ -120,7 +118,7 @@ if __name__ == "__main__":
     filtered_adata.write_h5ad(
         os.path.join(
             dimension_reduced_h5ad_dir,
-            series_name + "_dimension_reduced.h5ad",
+            SERIES_NAME + "_dimension_reduced.h5ad",
         )
     )
 
@@ -141,14 +139,13 @@ if __name__ == "__main__":
     # High resolution value results in more clusters
     print("Clustering with Leiden algorithm...")
     rsc.tl.leiden(filtered_adata, resolution=leiden_resolution)
-    plot.plot_umap(filtered_adata, series_name)
+    plot.plot_umap(filtered_adata, SERIES_NAME)
 
     clustered_h5ad_dir = find_env_dir("CLUSTERED_H5AD")
-
     filtered_adata.write_h5ad(
         os.path.join(
             clustered_h5ad_dir,
-            series_name + ".h5ad",
+            SERIES_NAME + ".h5ad",
         )
     )
 

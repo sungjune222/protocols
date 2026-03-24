@@ -1,0 +1,158 @@
+suppressPackageStartupMessages({
+  library(glmmSeq)
+  library(DESeq2)
+  library(ashr)
+  library(parallel)
+})
+
+meta_df[[condition_col]] <- relevel(
+  as.factor(meta_df[[condition_col]]),
+  ref = group_control
+)
+meta_df[[random_effect_col]] <- as.factor(meta_df[[random_effect_col]])
+
+dds <- DESeqDataSetFromMatrix(
+  as.matrix(countdata), meta_df, as.formula(formula_str_fixed)
+)
+dds <- estimateSizeFactors(dds)
+dds <- estimateDispersions(dds, quiet = TRUE)
+
+robust_disp <- setNames(dispersions(dds), rownames(countdata))
+keep_disp <- is.finite(robust_disp) & !is.na(robust_disp) & (robust_disp > 0)
+if (!any(keep_disp)) stop("No genes with valid dispersion estimates.")
+countdata <- countdata[keep_disp, , drop = FALSE]
+robust_disp <- robust_disp[keep_disp]
+
+size_factor <- sizeFactors(dds)
+
+ctrl_samps <- rownames(meta_df)[meta_df[[condition_col]] == group_control]
+test_samps <- rownames(meta_df)[meta_df[[condition_col]] == group_test]
+
+cpm_mat <- sweep(
+  as.matrix(countdata), 2, as.numeric(meta_df$library_size), "/"
+) * 1e6
+mean_ctrl <- rowMeans(cpm_mat[, ctrl_samps, drop = FALSE])
+mean_test <- rowMeans(cpm_mat[, test_samps, drop = FALSE])
+
+genes <- rownames(countdata)
+num_chunks <- min(n_cores, length(genes))
+gene_chunks <- split(genes, cut(seq_along(genes), num_chunks, labels = FALSE))
+
+target_col <- paste0(condition_col, group_test)
+target_term <- condition_col
+
+clust <- makeCluster(num_chunks, type = "PSOCK")
+clusterExport(clust, c(
+  "countdata", "meta_df", "formula_str_glmm", "formula_str_reduced",
+  "random_effect_col", "robust_disp", "target_col", "target_term",
+  "size_factor", "test_method"
+), envir = environment())
+clusterEvalQ(clust, suppressPackageStartupMessages(library(glmmSeq)))
+
+res_list <- parLapply(clust, gene_chunks, function(g_chunk) {
+  res <- data.frame(
+    gene = g_chunk, coefs = NA_real_, se = NA_real_,
+    pval = NA_real_, stringsAsFactors = FALSE
+  )
+  rownames(res) <- g_chunk
+
+  fit_args <- list(
+    modelFormula = as.formula(formula_str_glmm),
+    countdata = as.matrix(countdata[g_chunk, , drop = FALSE]),
+    metadata = meta_df,
+    id = random_effect_col,
+    dispersion = robust_disp[g_chunk],
+    sizeFactors = size_factor,
+    returnList = TRUE,
+    cores = 1,
+    progress = FALSE
+  )
+  if (test_method == "LRT") {
+    fit_args$reduced <- as.formula(formula_str_reduced)
+  }
+
+  fit <- tryCatch(
+    {
+      do.call(glmmSeq, fit_args)
+    },
+    error = function(e) NULL
+  )
+
+  if (is.null(fit)) {
+    return(res)
+  }
+
+  for (i in seq_along(fit)) {
+    one_fit <- fit[[i]]
+    one_gene <- g_chunk[i]
+
+    if (length(one_fit$coef) == 1 && is.na(one_fit$coef)) next
+    if (length(one_fit$stdErr) == 1 && is.na(one_fit$stdErr)) next
+
+    if (target_col %in% names(one_fit$coef)) {
+      res[one_gene, "coefs"] <- as.numeric(one_fit$coef[target_col])
+      res[one_gene, "se"] <- as.numeric(one_fit$stdErr[target_col])
+    }
+
+    if (test_method == "LRT") {
+      if (!is.null(
+        one_fit$chisq
+      ) && !is.null(
+        one_fit$df
+      ) && !is.na(
+        one_fit$chisq[1]
+      ) && !is.na(
+        one_fit$df[1]
+      )) {
+        res[one_gene, "pval"] <- pchisq(
+          one_fit$chisq[1],
+          df = one_fit$df[1], lower.tail = FALSE
+        )
+      }
+    } else {
+      term_idx <- which(names(one_fit$chisq) == target_term)
+      if (length(term_idx) == 1 && !is.na(
+        one_fit$chisq[term_idx]
+      ) && !is.na(
+        one_fit$df[term_idx]
+      )) {
+        res[one_gene, "pval"] <- pchisq(
+          one_fit$chisq[term_idx],
+          df = one_fit$df[term_idx], lower.tail = FALSE
+        )
+      }
+    }
+  }
+  res
+})
+stopCluster(clust)
+
+comb <- do.call(rbind, res_list)
+padj_res <- as.numeric(p.adjust(comb$pval, method = "BH"))
+
+lfc <- as.numeric(comb$coefs / log(2))
+lfc_se <- as.numeric(comb$se / log(2))
+
+ash_lfc <- rep(NA_real_, nrow(comb))
+ash_se <- rep(NA_real_, nrow(comb))
+valid <- !is.na(lfc) & !is.na(lfc_se)
+
+if (any(valid)) {
+  ash_res <- ash(lfc[valid], lfc_se[valid], mixcompdist = "normal")
+  ash_lfc[valid] <- as.numeric(ash_res$result$PosteriorMean)
+  ash_se[valid] <- as.numeric(ash_res$result$PosteriorSD)
+}
+
+res_df <- data.frame(
+  gene = comb$gene,
+  baseMean_control = as.numeric(mean_ctrl[comb$gene]),
+  baseMean_test = as.numeric(mean_test[comb$gene]),
+  log2FoldChange = lfc,
+  lfcSE = lfc_se,
+  log2FoldChange_shrunk = ash_lfc,
+  lfcSE_shrunk = ash_se,
+  pvalue = as.numeric(comb$pval),
+  padj = padj_res,
+  contrast = paste0(group_test, "_vs_", group_control),
+  stringsAsFactors = FALSE
+)
