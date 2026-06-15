@@ -35,91 +35,166 @@ else
     exit 1
 fi
 
+REF_DIR="$ROOT_DIR/references/raw"
+mkdir -p "$REF_DIR"
+
+function download_reference() {
+    local BASE_URL="$1"
+    local FILE="$2"
+
+    local FILE_UNZIPPED="$REF_DIR/${FILE%.gz}"
+
+    if [ ! -f "$REF_DIR/$FILE" ]; then
+        echo "Downloading '$FILE'"
+        wget -O "$REF_DIR/$FILE" "$BASE_URL/$FILE"
+    fi
+
+    # Unzipping (Keep originals)
+    if [ ! -f "$FILE_UNZIPPED" ]; then
+        gunzip -k "$REF_DIR/$FILE"
+    fi
+}
+
 # ==========================================
-# 1. Download and install Cell Ranger
+# 1. Download and install 10x Genomics tools
 # ==========================================
 
 TOOL_DIR="$ROOT_DIR/.tools"
-
 mkdir -p "$TOOL_DIR"
 
-if ls "$TOOL_DIR"/cellranger-*/cellranger 1> /dev/null 2>&1; then
-    echo "Cell Ranger already installed. Skipping download."
-    CELLRANGER_PATH=$(ls -d "$TOOL_DIR"/cellranger-* | head -n 1)
-else
-    echo -ne "\033[1;32mPaste Cell Ranger download URL and press Enter: \033[0m"
-    read DOWNLOAD_URL
-    DOWNLOAD_URL=$(echo "$DOWNLOAD_URL" | tr -d '"' | tr -d "'")
-    wget -O cellranger.tar.gz "$DOWNLOAD_URL"
-    tar -xzvf cellranger.tar.gz -C "$TOOL_DIR"
-    rm cellranger.tar.gz
-    CELLRANGER_PATH=$(ls -d "$TOOL_DIR"/cellranger-* | head -n 1)
-fi
-export PATH="$CELLRANGER_PATH:$PATH"
+install_10x_tool() {
+    local PROGRAM="$1" 
 
-if ! command -v cellranger &> /dev/null; then
-    echo "Error: Cell Ranger path setup failed."
-    exit 1
-fi
-echo "Cell Ranger is ready: $(which cellranger)"
+    if ls "$TOOL_DIR"/${PROGRAM}-*/${PROGRAM} 1> /dev/null 2>&1; then
+        echo "$PROGRAM already installed. Skipping download."
+        local PROGRAM_DIR=$(ls -d "$TOOL_DIR"/${PROGRAM}-* | head -n 1)
+    else
+        echo -ne "\033[1;32mPaste $PROGRAM download URL and press Enter: \033[0m"
+        read DOWNLOAD_URL
+        DOWNLOAD_URL=$(echo "$DOWNLOAD_URL" | tr -d '"' | tr -d "'")
+
+        local ARCHIVE_NAME="${PROGRAM}.tar.gz"
+        wget -O "$ARCHIVE_NAME" "$DOWNLOAD_URL"
+        tar -xzvf "$ARCHIVE_NAME" -C "$TOOL_DIR"
+        rm "$ARCHIVE_NAME"
+        local PROGRAM_DIR=$(ls -d "$TOOL_DIR"/${PROGRAM}-* | head -n 1)
+    fi
+    export PATH="$PROGRAM_DIR:$PATH"
+
+    if ! command -v "$PROGRAM" &> /dev/null; then
+        echo "Error: $PROGRAM path setup failed."
+        exit 1
+    fi
+    echo "$PROGRAM is ready: $(which $PROGRAM)"
+}
+
+install_10x_tool "cellranger"
+install_10x_tool "cellranger-arc"
 
 # ==========================================
-# 2. Reference Builder
+# 2. Building STAR index
+# ==========================================
+function build_star_index() {
+    local BASE_URL="$1"
+    local FASTA_FILE="$2"
+    local GTF_FILE="$3"
+    local OUTPUT_REFERENCE="$4"
+
+    echo "Building STAR index: $OUTPUT_REFERENCE"
+    echo "Checking Reference Files..."
+
+    # Downloading fasta and gtf file if needed
+    download_reference "$BASE_URL" "$FASTA_FILE"
+    download_reference "$BASE_URL" "$GTF_FILE" 
+
+    FASTA_UNZIPPED="$REF_DIR/${FASTA_FILE%.gz}"
+    GTF_UNZIPPED="$REF_DIR/${GTF_FILE%.gz}"
+
+    sed -i 's/Curated Genomic/Curated_Genomic/g' "$GTF_UNZIPPED"
+
+    BULK_REFERENCE_DIR="$ROOT_DIR/references/bulk"
+    mkdir -p "$BULK_REFERENCE_DIR"
+    cd "$BULK_REFERENCE_DIR" || exit 1
+
+    if [ -d "$OUTPUT_REFERENCE" ]; then
+        echo "Index '$OUTPUT_REFERENCE' already exists"
+    else
+        echo "Running STAR"
+        STAR \
+            --runThreadN "$N_THREADS" \
+            --runMode genomeGenerate \
+            --genomeDir "$BULK_REFERENCE_DIR/$OUTPUT_REFERENCE" \
+            --genomeFastaFiles "$FASTA_UNZIPPED" \
+            --sjdbGTFfile "$GTF_UNZIPPED" 
+    fi
+}
+
+# Homo sapiens (human) GRCh38.p14
+build_star_index \
+    "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14" \
+    "GCF_000001405.40_GRCh38.p14_genomic.fna.gz" \
+    "GCF_000001405.40_GRCh38.p14_genomic.gtf.gz" \
+    "GRCh38"
+
+# Mus musculus (house mouse) GRCm39
+build_star_index \
+    "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/635/GCF_000001635.27_GRCm39" \
+    "GCF_000001635.27_GRCm39_genomic.fna.gz" \
+    "GCF_000001635.27_GRCm39_genomic.gtf.gz" \
+    "GRCm39"
+
+# Callithrix jacchus (white-tufted-ear marmoset) calJac240_pri
+build_star_index \
+    "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/049/354/715/GCF_049354715.1_calJac240_pri" \
+    "GCF_049354715.1_calJac240_pri_genomic.fna.gz" \
+    "GCF_049354715.1_calJac240_pri_genomic.gtf.gz" \
+    "calJac240_pri"
+
+# ==========================================
+# 3. Building cellranger References
 # ==========================================
 function build_cellranger_ref() {
     local BASE_URL="$1"
     local FASTA_FILE="$2"
     local GTF_FILE="$3"
-    local OUTPUT_GENOME="$4"
+    local OUTPUT_REFERENCE="$4"
 
-    local REF_DIR="$ROOT_DIR/references/raw"
-    local FASTA_UNZIPPED="$REF_DIR/${FASTA_FILE%.gz}"
-    local GTF_UNZIPPED="$REF_DIR/${GTF_FILE%.gz}"
-
-    echo " Building Reference: $OUTPUT_GENOME"
-    mkdir -p "$REF_DIR"
-
+    echo "Building Cellranger Reference: $OUTPUT_REFERENCE"
     echo "Checking Reference Files..."
-    if [ ! -f "$REF_DIR/$FASTA_FILE" ]; then
-        echo "Downloading FASTA..."
-        wget -O "$REF_DIR/$FASTA_FILE" "$BASE_URL/$FASTA_FILE"
-    fi
 
-    if [ ! -f "$REF_DIR/$GTF_FILE" ]; then
-        echo "Downloading GTF..."
-        wget -O "$REF_DIR/$GTF_FILE" "$BASE_URL/$GTF_FILE"
-    fi
+    # Downloading fasta and gtf file if needed
+    download_reference "$BASE_URL" "$FASTA_FILE"
+    download_reference "$BASE_URL" "$GTF_FILE" 
 
-    echo "Unzipping (Keep originals)..."
-    if [ ! -f "$FASTA_UNZIPPED" ]; then
-        gunzip -k "$REF_DIR/$FASTA_FILE"
-    fi
-    if [ ! -f "$GTF_UNZIPPED" ]; then
-        gunzip -k "$REF_DIR/$GTF_FILE"
-    fi
+    FASTA_UNZIPPED="$REF_DIR/${FASTA_FILE%.gz}"
+    GTF_UNZIPPED="$REF_DIR/${GTF_FILE%.gz}"
 
     sed -i 's/Curated Genomic/Curated_Genomic/g' "$GTF_UNZIPPED"
 
-    mkdir -p "$ROOT_DIR/references"
-    cd "$ROOT_DIR/references" || exit 1
+    local SC_REF_ROOT="$ROOT_DIR/references/sc"
+    mkdir -p "$SC_REF_ROOT"
+    cd "$SC_REF_ROOT" || exit 1
 
-    if [ -d "$OUTPUT_GENOME" ]; then
-        echo "Reference '$OUTPUT_GENOME' already exists. Skipping mkref."
+    if [ -d "$OUTPUT_REFERENCE" ]; then
+        echo "Reference '$OUTPUT_REFERENCE' already exists, skipping cellranger mkref"
     else
         echo "Running cellranger mkref..."
         cellranger telemetry disable
         cellranger mkref \
-            --genome="$OUTPUT_GENOME" \
+            --genome="$OUTPUT_REFERENCE" \
             --fasta="$FASTA_UNZIPPED" \
             --genes="$GTF_UNZIPPED" \
             --nthreads="$N_THREADS"
     fi
 }
 
-# ==========================================
-# 3. Building References
-# ==========================================
-
+# Homo sapiens (human) GRCh38.p14
+build_cellranger_ref \
+    "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14" \
+    "GCF_000001405.40_GRCh38.p14_genomic.fna.gz" \
+    "GCF_000001405.40_GRCh38.p14_genomic.gtf.gz" \
+    "GRCh38"
+    
 # Homo sapiens (human) T2T-CHM13 v2.0
 build_cellranger_ref \
     "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/009/914/755/GCF_009914755.1_T2T-CHM13v2.0" \
@@ -142,39 +217,14 @@ build_cellranger_ref \
     "calJac240_pri"
 
 # ==========================================
-# 4. Download Homo Sapiens Ensembl GTF for later use
+# 5. Downloading Ensembl GTF 
 # ==========================================
-BASE_URL="https://ftp.ensembl.org/pub/release-115/gtf/homo_sapiens"
-GTF_FILE="Homo_sapiens.GRCh38.115.gtf.gz"
+# Homo Sapiens
+download_reference \
+    "https://ftp.ensembl.org/pub/release-115/gtf/homo_sapiens" \
+    "Homo_sapiens.GRCh38.115.gtf.gz" 
 
-REF_DIR="$ROOT_DIR/references/raw"
-
-if [ ! -f "$REF_DIR/$GTF_FILE" ]; then
-    echo "Downloading GTF..."
-    wget -O "$REF_DIR/$GTF_FILE" "$BASE_URL/$GTF_FILE"
-fi
-
-if [ ! -f "$REF_DIR/${GTF_FILE%.gz}" ]; then
-    gunzip -k "$REF_DIR/$GTF_FILE"
-fi
-
-GTF_UNZIPPED="$REF_DIR/${GTF_FILE%.gz}"
-
-# ==========================================
-# 5. Download Mus Musculus Ensembl GTF for later use
-# ==========================================
-BASE_URL="https://ftp.ensembl.org/pub/release-115/gtf/mus_musculus"
-GTF_FILE="Mus_musculus.GRCm39.115.gtf.gz"
-
-REF_DIR="$ROOT_DIR/references/raw"
-
-if [ ! -f "$REF_DIR/$GTF_FILE" ]; then
-    echo "Downloading GTF..."
-    wget -O "$REF_DIR/$GTF_FILE" "$BASE_URL/$GTF_FILE"
-fi
-
-if [ ! -f "$REF_DIR/${GTF_FILE%.gz}" ]; then
-    gunzip -k "$REF_DIR/$GTF_FILE"
-fi
-
-GTF_UNZIPPED="$REF_DIR/${GTF_FILE%.gz}"
+# Mus Musculus
+download_reference \
+    "https://ftp.ensembl.org/pub/release-115/gtf/mus_musculus" \
+    "Mus_musculus.GRCm39.115.gtf.gz" 

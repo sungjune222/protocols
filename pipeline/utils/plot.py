@@ -81,11 +81,13 @@ def plot_qc(adata: AnnData, series_name: str, max_cells_per_sample: int = 5000) 
 
     variables = [
         "pct_counts_mt",
+        "pct_counts_ribo",
         "n_genes_by_counts",
         "log1p_total_counts",
     ]
     pretty_names = {
         "pct_counts_mt": "Mitochondrial Fraction (%)",
+        "pct_counts_ribo": "Ribosomal Fraction (%)",
         "n_genes_by_counts": "Detected Genes",
         "log1p_total_counts": "Sequencing Depth (Log1p UMI)",
     }

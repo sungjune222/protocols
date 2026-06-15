@@ -10,6 +10,10 @@
 *.txt
 *.pdf
 *.log
+*.out
+*.info
+*.summary
+*.tab
 *.pt
 *.gz
 *.tar
@@ -19,16 +23,19 @@
 *.fastq
 *.fna
 *.gtf
+*.bam
+*.bai
+*.sam
 *.pkl
 __pycache__/
 *.swp
 *.tmp
-activate.sh
 .tools/*
 references/*
 cellranger/*
 raw/*
 notebooks_example/project/*
+notebooks_example/nimlab/*
 # pixi environments
 .pixi/*
 !.pixi/config.toml

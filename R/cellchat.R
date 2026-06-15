@@ -1,14 +1,16 @@
 run_cellchat <- function(
   h5ad_file,
-  species, 
+  species,
   group_key = "leiden",
   sample_key = "sample",
   min_cells = 10
 ) {
   if (missing(species)) {
-    stop("Error: 'species' argument is required. Please specify 'mouse' or 'human'")
+    stop(
+      "Error: 'species' argument is required. Please specify 'mouse' or 'human'"
+    )
   }
-  species <- match.arg(species, choices = c("mouse", "human")) 
+  species <- match.arg(species, choices = c("mouse", "human"))
   if (species == "mouse") {
     CellChatDB <- CellChatDB.mouse
   } else {
@@ -91,7 +93,9 @@ run_cellchat <- function(
   # Summarize results into 2D group-by-group networks
   cellchat <- aggregateNet(cellchat)
 
-  saveRDS(cellchat, file = file.path(cellchat_dir, paste0(base_name, "_cellchat.rds")))
-
-  return(cellchat)
+  saveRDS(
+    cellchat,
+    file = file.path(cellchat_dir, paste0(base_name, "_cellchat.rds"))
+  )
+  cellchat
 }

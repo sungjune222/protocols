@@ -9,6 +9,7 @@ from anndata import AnnData
 from scipy.sparse import csr_matrix
 from pipeline.utils import plot
 from pipeline.utils.env import find_env_dir
+from pipeline.utils.extract_mt_gene import extract_mt_genes
 from pipeline.config.constants import (
     SINGLE_CELL_VAE_BATCH_SIZE,
 )
@@ -16,7 +17,8 @@ from pipeline.config.machine_learning import DataLoader
 
 if __name__ == "__main__":
     pre_h5ad_dir = find_env_dir("PRE_H5AD")
-    SERIES_NAME = "lin"
+    SERIES_NAME = "nimlab_0421"
+    SPECIES = "mouse"
     leiden_resolution = 3.5
     file = os.path.join(pre_h5ad_dir, SERIES_NAME + "_raw.h5ad")
 
@@ -29,10 +31,16 @@ if __name__ == "__main__":
     rsc.get.anndata_to_GPU(loaded_adata)
 
     # Quality assessment by calculating QC metrics
-    def quality_assess(adata: AnnData, ribo_genes: pd.DataFrame) -> AnnData:
-        # Marking mitochondrial and ribosomal genes
-        mt_mask = adata.var.index.str.lower().str.startswith("mt-")
-        ribo_mask = adata.var_names.isin(ribo_genes[0].values)
+    def quality_assess(adata: AnnData) -> AnnData:
+        # Marking mitochondrial and ribosomal genes\
+        mt_genes = extract_mt_genes(species=SPECIES)
+        mt_mask = adata.var.index.isin(mt_genes)
+
+        ribo_url = "http://software.broadinstitute.org/gsea/msigdb/download_geneset.jsp?geneSetName=KEGG_RIBOSOME&fileType=txt"
+        ribo_genes = pd.read_table(ribo_url, skiprows=2, header=None)
+        ribo_genes_lower = set(ribo_genes[0].str.lower().values)
+        ribo_mask = adata.var.index.str.lower().isin(ribo_genes_lower)
+
         adata.var["mt"] = np.asarray(mt_mask, dtype=bool)
         adata.var["ribo"] = np.asarray(ribo_mask, dtype=bool)
 
@@ -42,17 +50,14 @@ if __name__ == "__main__":
         )
         return adata
 
-    ribo_url = "http://software.broadinstitute.org/gsea/msigdb/download_geneset.jsp?geneSetName=KEGG_RIBOSOME&fileType=txt"
-    ribo_genes = pd.read_table(ribo_url, skiprows=2, header=None)
-
     print("Assessing quality...")
-    quality_assessed_adata = quality_assess(loaded_adata, ribo_genes)
+    quality_assessed_adata = quality_assess(loaded_adata)
 
     # Cell and gene filtering
     rsc.pp.filter_cells(quality_assessed_adata, min_genes=200)
     rsc.pp.filter_genes(quality_assessed_adata, min_cells=10)
     # Filtered cells and genes necessitate re-calculation of QC metrics
-    quality_assessed_adata = quality_assess(quality_assessed_adata, ribo_genes)
+    quality_assessed_adata = quality_assess(quality_assessed_adata)
 
     plot.plot_qc(quality_assessed_adata, SERIES_NAME)
 

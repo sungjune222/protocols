@@ -34,6 +34,7 @@ def pseudobulk_glmmseq_comp(
         cond_mask &= adata.obs[col].isin(vals)
         
     counts_df, pb_meta = pseudobulk(adata[cond_mask], group_keys=group_keys, min_cells=min_cells)
+    counts_df = pd.DataFrame(counts_df.sparse.to_dense())
     
     min_count_per_sample = 2
     min_samples = int(np.ceil(counts_df.shape[0] * 0.10))
@@ -45,7 +46,7 @@ def pseudobulk_glmmseq_comp(
     
     assert isinstance(adata.obs, pd.DataFrame)
     obs_meta = adata.obs.drop_duplicates(subset=group_keys).copy()
-    obs_meta["pseudobulk_id"] = obs_meta[group_keys].astype(str).agg("__".join, axis=1)
+    obs_meta["pseudobulk_id"] = obs_meta[group_keys].astype(str).agg("_".join, axis=1)
     meta = obs_meta.set_index("pseudobulk_id").loc[pb_counts.index]
     meta["n_cells"] = pb_meta["n_cells"]
     meta["library_size"] = pb_meta["library_size"]

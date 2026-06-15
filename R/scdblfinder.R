@@ -24,7 +24,7 @@ seed <- as.integer(get_arg("--seed", "1"))
 
 if (is.null(manifest) || is.null(outdir)) {
   stop(
-    "Usage: --manifest <success_samples.csv> --outdir <dir>"
+    "Usage: --manifest <success_libraries.csv> --outdir <dir>"
   )
 }
 
@@ -32,29 +32,29 @@ dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
 set.seed(seed)
 
 tab <- read.csv(manifest)
-if (!all(c("SampleID", "FilteredH5") %in% colnames(tab))) {
-  stop("Manifest must contain SampleID and FilteredH5 columns")
+if (!all(c("LibraryID", "FilteredH5") %in% colnames(tab))) {
+  stop("Manifest must contain LibraryID and FilteredH5 columns")
 }
 
 sce_list <- vector("list", nrow(tab))
-removed_zero <- setNames(integer(nrow(tab)), tab$SampleID)
+removed_zero <- setNames(integer(nrow(tab)), tab$LibraryID)
 
 for (i in seq_len(nrow(tab))) {
-  sid <- tab$SampleID[i]
-  message(sprintf("[%d/%d] Loading sample: %s ...", i, nrow(tab), sid))
+  library_id <- tab$LibraryID[i]
+  message(sprintf("[%d/%d] Loading library: %s ...", i, nrow(tab), library_id))
   sce <- read10xCounts(tab$FilteredH5[i], col.names = TRUE, type = "HDF5")
 
   rownames(sce) <- make.unique(rownames(sce))
   orig_bc <- make.unique(colnames(sce))
-  colnames(sce) <- paste0(orig_bc, "-", sid)
+  colnames(sce) <- paste0(orig_bc, "-", library_id)
   sce$orig_barcode <- orig_bc
 
   keep <- Matrix::colSums(counts(sce)) > 0
-  removed_zero[sid] <- sum(!keep)
+  removed_zero[library_id] <- sum(!keep)
   sce <- sce[, keep]
 
   if (ncol(sce) == 0) next
-  sce$sample_id <- sid
+  sce$library_id <- library_id
   sce_list[[i]] <- sce
 }
 
@@ -89,7 +89,7 @@ bp <- if (threads > 1) {
 
 sce <- scDblFinder(
   sce,
-  samples = sce$sample_id,
+  samples = sce$library_id,
   clusters = TRUE,
   dbr = NULL,
   dbr.per1k = dbr_per1k,
@@ -101,31 +101,31 @@ sce <- scDblFinder(
 calls <- data.frame(
   cell = colnames(sce),
   orig_barcode = sce$orig_barcode,
-  sample_id = sce$sample_id,
+  library_id = sce$library_id,
   score = sce$scDblFinder.score,
   class = sce$scDblFinder.class
 )
 
-for (sid in unique(calls$sample_id)) {
-  sdir <- file.path(outdir, sid)
+for (library_id in unique(calls$library_id)) {
+  sdir <- file.path(outdir, library_id)
   dir.create(sdir, recursive = TRUE, showWarnings = FALSE)
 
-  sub <- calls[calls$sample_id == sid, , drop = FALSE]
+  sub <- calls[calls$library_id == library_id, , drop = FALSE]
   singlet <- sub$class == "singlet"
   doublet <- sub$class == "doublet"
 
   write.csv(
     data.frame(barcode = sub$orig_barcode[singlet]),
-    file.path(sdir, sprintf("%s_singlet_barcodes.csv", sid)),
+    file.path(sdir, sprintf("%s_singlet_barcodes.csv", library_id)),
     row.names = FALSE
   )
 
   expected_doublet_fraction <- min(1, (nrow(sub) / 1000) * dbr_per1k)
   write.csv(
     data.frame(
-      SampleID = sid,
+      LibraryID = library_id,
       TotalCells = nrow(sub),
-      RemovedZeroCountCells = unname(removed_zero[sid]),
+      RemovedZeroCountCells = unname(removed_zero[library_id]),
       PredictedDoublets = sum(doublet, na.rm = TRUE),
       PredictedSinglets = sum(singlet, na.rm = TRUE),
       ObservedDoubletFraction = mean(doublet, na.rm = TRUE),
@@ -135,7 +135,7 @@ for (sid in unique(calls$sample_id)) {
       Status = "SUCCESS",
       Note = "OK"
     ),
-    file.path(sdir, sprintf("%s_summary.csv", sid)),
+    file.path(sdir, sprintf("%s_summary.csv", library_id)),
     row.names = FALSE
   )
 }
