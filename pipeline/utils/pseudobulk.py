@@ -47,6 +47,7 @@ def pseudobulk(
 
     assert isinstance(kept_uniques, pd.MultiIndex)
     meta_df = kept_uniques.to_frame(index=False)
+    meta_df.columns = keys
     
     pseudobulk_id = pd.Index(
         meta_df.astype(str).agg("_".join, axis=1),

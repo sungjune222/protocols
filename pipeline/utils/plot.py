@@ -3,9 +3,9 @@ import matplotlib
 # Supports file saving only; GUI rendering is not available
 matplotlib.use("Agg")
 
+import colorsys
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as patheffects
-from matplotlib.axes import Axes
 import numpy as np
 import os
 import pandas as pd
@@ -14,6 +14,8 @@ import scvi
 import seaborn as sns
 import warnings
 from anndata import AnnData
+from math import gcd
+from matplotlib.axes import Axes
 from scipy.sparse import csr_matrix
 from typing import List, Dict, Any, Optional
 from pipeline.utils.env import find_env_dir
@@ -53,7 +55,7 @@ def plot_validation_loss(
         format=FIG_FORMAT,
         bbox_inches="tight",
     )
-    plt.close()
+    plt.close("all")
 
 
 # %% Visualizes sample quality metrics across multiple samples
@@ -203,7 +205,7 @@ def plot_qc(adata: AnnData, series_name: str, max_cells_per_sample: int = 5000) 
             f"{variable}.{FIG_FORMAT}",
         )
         plt.savefig(filename, format=FIG_FORMAT, bbox_inches="tight")
-        plt.close()
+        plt.close("all")
     sns.reset_defaults()
 
 
@@ -423,7 +425,7 @@ def plot_dotplot(
         var_group_rotation=0,
     )
     plt.savefig(os.path.join(dotplots_dir, f"None_dotplot.{FIG_FORMAT}"), format=FIG_FORMAT, bbox_inches="tight")
-    plt.close()
+    plt.close("all")
 
 
 def plot_violin(adata: AnnData, gene: str) -> None:
@@ -456,31 +458,54 @@ def plot_violin(adata: AnnData, gene: str) -> None:
     fig.savefig(
         os.path.join(violin_plots_dir, filename), format=FIG_FORMAT, bbox_inches="tight"
     )
-    plt.close()
+    plt.close("all")
+
+def make_distinct_colors(n):
+    step = max(1, n // 2 - 1)
+    while gcd(step, n) != 1:
+        step -= 1
+
+    colors = []
+    for i in range(n):
+        h = ((i * step) % n) / n
+        s = 0.65 + 0.25 * (i % 2)
+        v = 0.80 + 0.15 * ((i // 2) % 2)
+        colors.append(colorsys.hsv_to_rgb(h, s, v))
+
+    return colors
 
 def plot_proportions(
         adata: AnnData,
         series_name: str,
         group_key: str,
-        sample_key: str
+        sample_key: str,
+        exclude_group: list = ["Doublet", "LowCount", "LowQuality"] # Groups to exclude from the plot
     ):
     proportions_plots_dir = find_env_dir("PROPORTION_PLOTS")
     proportions_plots_dir = os.path.join(proportions_plots_dir, series_name)
     os.makedirs(proportions_plots_dir, exist_ok=True)
 
+    obs_df = adata.obs[~adata.obs[group_key].isin(exclude_group)]
+
     prop_df = pd.crosstab(
-        adata.obs[group_key].to_numpy(), 
-        adata.obs[sample_key].to_numpy(), 
+        obs_df[group_key].to_numpy(), 
+        obs_df[sample_key].to_numpy(), 
         normalize='index'
     )
 
+    try:
+        prop_df = prop_df.loc[sorted(prop_df.index, key=lambda x: int(x))]
+    except Exception:
+        prop_df = prop_df.sort_index()
+    
+    colors = make_distinct_colors(prop_df.shape[1])
     fig, ax = plt.subplots(figsize=(10, 6))
 
     prop_df.plot(
         kind='bar', 
         stacked=True, 
         ax=ax, 
-        colormap='tab20',
+        color=colors,
         edgecolor='none'
     )
 
@@ -501,4 +526,4 @@ def plot_proportions(
     fig.savefig(
         os.path.join(proportions_plots_dir, filename), format=FIG_FORMAT, bbox_inches="tight"
     )
-    plt.close()
+    plt.close("all")

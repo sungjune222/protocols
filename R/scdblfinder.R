@@ -7,7 +7,6 @@ suppressPackageStartupMessages({
 })
 
 args <- commandArgs(trailingOnly = TRUE)
-
 get_arg <- function(flag, default = NULL) {
   i <- match(flag, args)
   if (is.na(i)) {
@@ -23,9 +22,7 @@ dbr_per1k <- as.numeric(get_arg("--dbr_per1k", "0.008"))
 seed <- as.integer(get_arg("--seed", "1"))
 
 if (is.null(manifest) || is.null(outdir)) {
-  stop(
-    "Usage: --manifest <success_libraries.csv> --outdir <dir>"
-  )
+  stop("Usage: --manifest <success_samples.csv> --outdir <dir>")
 }
 
 dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
@@ -36,51 +33,68 @@ if (!all(c("LibraryID", "FilteredH5") %in% colnames(tab))) {
   stop("Manifest must contain LibraryID and FilteredH5 columns")
 }
 
+keep_gex <- function(sce, library_id) {
+  rd <- as.data.frame(rowData(sce))
+
+  if (!"feature_types" %in% colnames(rd)) {
+    return(sce)
+  }
+
+  keep <- as.character(rd[["feature_types"]]) == "Gene Expression"
+  if (!any(keep)) {
+    stop(
+      sprintf("No Gene Expression features found in %s", library_id)
+    )
+  }
+  sce[keep, ]
+}
+
 sce_list <- vector("list", nrow(tab))
 removed_zero <- setNames(integer(nrow(tab)), tab$LibraryID)
 
 for (i in seq_len(nrow(tab))) {
   library_id <- tab$LibraryID[i]
-  message(sprintf("[%d/%d] Loading library: %s ...", i, nrow(tab), library_id))
+  message(sprintf("[%d/%d] Loading library: %s", i, nrow(tab), library_id))
+
   sce <- read10xCounts(tab$FilteredH5[i], col.names = TRUE, type = "HDF5")
+  sce <- keep_gex(sce, library_id)
 
   rownames(sce) <- make.unique(rownames(sce))
   orig_bc <- make.unique(colnames(sce))
   colnames(sce) <- paste0(orig_bc, "-", library_id)
   sce$orig_barcode <- orig_bc
+  sce$library_id <- library_id
 
-  keep <- Matrix::colSums(counts(sce)) > 0
+  keep <- colSums(counts(sce)) > 0
   removed_zero[library_id] <- sum(!keep)
   sce <- sce[, keep]
-
   if (ncol(sce) == 0) next
-  sce$library_id <- library_id
+
   sce_list[[i]] <- sce
 }
 
 sce_list <- Filter(Negate(is.null), sce_list)
 if (length(sce_list) == 0) stop("No cells remain after zero-count filtering.")
-all_genes <- Reduce(union, lapply(sce_list, rownames))
 
+all_genes <- Reduce(union, lapply(sce_list, rownames))
 sce_list <- lapply(sce_list, function(x) {
   missing_genes <- setdiff(all_genes, rownames(x))
+  mat <- counts(x)
 
   if (length(missing_genes) > 0) {
-    zero_mat <- Matrix::Matrix(
+    zero_mat <- Matrix(
       0,
       nrow = length(missing_genes), ncol = ncol(x), sparse = TRUE
     )
     rownames(zero_mat) <- missing_genes
-    new_counts <- rbind(counts(x), zero_mat)
-  } else {
-    new_counts <- counts(x)
+    mat <- rbind(mat, zero_mat)
   }
 
-  new_counts <- new_counts[all_genes, , drop = FALSE]
-  SingleCellExperiment(list(counts = new_counts), colData = colData(x))
+  mat <- mat[all_genes, , drop = FALSE]
+  SingleCellExperiment(list(counts = mat), colData = colData(x))
 })
-sce <- do.call(cbind, sce_list)
 
+sce <- do.call(cbind, sce_list)
 bp <- if (threads > 1) {
   MulticoreParam(workers = threads, progressbar = TRUE, RNGseed = seed)
 } else {
@@ -120,7 +134,6 @@ for (library_id in unique(calls$library_id)) {
     row.names = FALSE
   )
 
-  expected_doublet_fraction <- min(1, (nrow(sub) / 1000) * dbr_per1k)
   write.csv(
     data.frame(
       LibraryID = library_id,
@@ -129,7 +142,7 @@ for (library_id in unique(calls$library_id)) {
       PredictedDoublets = sum(doublet, na.rm = TRUE),
       PredictedSinglets = sum(singlet, na.rm = TRUE),
       ObservedDoubletFraction = mean(doublet, na.rm = TRUE),
-      ExpectedDoubletFraction = expected_doublet_fraction,
+      ExpectedDoubletFraction = min(1, (nrow(sub) / 1000) * dbr_per1k),
       dbr_per1k = dbr_per1k,
       scDblFinderVersion = as.character(packageVersion("scDblFinder")),
       Status = "SUCCESS",

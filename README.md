@@ -31,6 +31,9 @@ exit
 
 # 6) update R dependencies
 pixi shell
+
+# 7) copy .env.example and make .env file
+# Make sure to fill in the necessary paths in the .env file
 ```
 ## scRNA-seq Analysis
 

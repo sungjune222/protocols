@@ -25,6 +25,10 @@ def parse_args() -> Args:
         "--outdir", required=True, help="Directory to save output files"
     )
     parser.add_argument("--sample_id", required=True, help="Sample ID")
+    parser.add_argument(
+        "--multiome", action="store_true", 
+        help="Read all feature types from 10x h5, e.g. Gene Expression + Peaks"
+    )
     return parser.parse_args(namespace=Args())
 
 
@@ -33,7 +37,7 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
     print(f"Processing input: [{args.sample_id}]")
 
-    adata = sc.read_10x_h5(args.input)
+    adata = sc.read_10x_h5(args.input, gex_only=not args.multiome)
     adata.X = csr_matrix(adata.X)
 
     singlets = pd.read_csv(args.singlets)

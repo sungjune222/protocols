@@ -13,13 +13,15 @@ PIXI_EXEC=$(command -v pixi)
 # ==========================================
 # Please set your parameters here
 # ==========================================
-PROJECT_ID="nimlab_0421"  # "PRJNA1019314" (Parkinson) # "PRJNA1211983" (ALS)
+PROJECT_ID="PRJNA1103232"  
 REFERENCE_GENOME="GRCm39"  # "GRCh38"
 
 # Input mode:
 #   sra   : use SRA accession, download .sra, convert with fasterq-dump
 #   local : use local 10x FASTQ zip files
-INPUT_MODE="local"
+#   immport : use local ImmPort downloaded FASTQ files without any folder
+INPUT_MODE="sra"
+IMMPORT_KEY="primary_gut"
 # ==========================================
 
 TOOL_PATH="$ROOT_DIR/.tools"
@@ -44,6 +46,7 @@ mkdir -p "$META_DIR"
 
 LIBRARY_LIST="$META_DIR/library_list.txt"
 : > "$LIBRARY_LIST"
+
 # ==========================================
 # [PART 1] Download
 # ==========================================
@@ -60,9 +63,13 @@ if [[ "$INPUT_MODE" == "sra" ]]; then
     LIBRARY_MANIFEST="$META_DIR/library_manifest.txt"
     RUN_MANIFEST="$META_DIR/run_manifest.txt"
     DOWNLOAD_INPUT_LIST="$META_DIR/download_input_list.txt"
-
-    esearch -db sra -query "$PROJECT_ID" | efetch -format runinfo > "$RUNINFO_CSV"
-    esearch -db sra -query "$PROJECT_ID" | efetch -format xml > "$SRA_XML"
+    
+    echo "=== Fetching SRA IDs ==="
+    SRA_IDS=$(curl -sS "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=sra&term=$PROJECT_ID&retmax=5000" | grep -o '<Id>[^<]*' | sed 's/<Id>//' | paste -sd "," -)
+    echo "=== Downloading RunInfo ==="
+    curl -sS -X POST -d "db=sra&id=$SRA_IDS" "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?rettype=runinfo&retmode=text" > "$RUNINFO_CSV"
+    echo "=== Downloading SRA XML ==="
+    curl -sS -X POST -d "db=sra&id=$SRA_IDS" "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?rettype=docsum&retmode=xml" > "$SRA_XML"
 
     SRA_RUNINFO_PARSE_PYTHON_SCRIPT="$ROOT_DIR/pipeline/utils/single_cell/sra_runinfo_parse.py"
     "$PIXI_EXEC" run python3 "$SRA_RUNINFO_PARSE_PYTHON_SCRIPT" \
@@ -110,9 +117,30 @@ elif [[ "$INPUT_MODE" == "local" ]]; then
         exit 1
     fi
 
+elif [[ "$INPUT_MODE" == "immport" ]]; then
+    echo "=== [PART 1] ImmPort mode: Selecting local ImmPort downloaded FASTQ files ==="
+    PROJECT_FASTQ_DIR="$PROJECT_ROOT_DIR/fastq"
+    if [[ ! -d "$PROJECT_FASTQ_DIR" ]]; then
+        PROJECT_FASTQ_DIR="$PROJECT_ROOT_DIR"
+    fi
+    FASTQ_METADATA_FILE="$META_DIR/meta_data.txt"
+    echo "ImmPort key: ${IMMPORT_KEY:-<all>}"
+
+    IMMPORT_FASTQ_MANIFEST_PYTHON_SCRIPT="$ROOT_DIR/pipeline/utils/single_cell/immport_fastq_manifest.py"
+    "$PIXI_EXEC" run python3 "$IMMPORT_FASTQ_MANIFEST_PYTHON_SCRIPT" \
+        --metadata_file "$FASTQ_METADATA_FILE" \
+        --key "$IMMPORT_KEY" \
+        --library_list "$LIBRARY_LIST"
+
+    TOTAL_COUNT=$(wc -l < "$LIBRARY_LIST")
+    echo "Found $TOTAL_COUNT ImmPort-mode libraries in $PROJECT_ID"
+    if [[ "$TOTAL_COUNT" -eq 0 ]]; then
+        exit 1
+    fi
+
 else
     echo "Error: unknown INPUT_MODE=$INPUT_MODE"
-    echo "Allowed values: sra, local"
+    echo "Allowed values: sra, local, immport"
     exit 1
 fi
 
@@ -123,6 +151,12 @@ fi
 run_cellranger_count() {
     local LIBRARY_ID="$1"
     local FASTQ_LIBRARY_DIR="$2"
+    local CHEMISTRY="${3:-auto}"
+    local CHEMISTRY_ARGS=()
+
+    if [[ "$CHEMISTRY" != "auto" ]]; then
+        CHEMISTRY_ARGS=(--chemistry="$CHEMISTRY")
+    fi
 
     if [[ -d "$CELLRANGER_DIR/$LIBRARY_ID" && ! -d "$CELLRANGER_DIR/$LIBRARY_ID/outs" ]]; then
         rm -rf "$CELLRANGER_DIR/$LIBRARY_ID"
@@ -130,7 +164,7 @@ run_cellranger_count() {
 
     (
         cd "$CELLRANGER_DIR" || exit 1
-        echo "  -> Running Cell Ranger..."
+        echo "  -> Running Cell Ranger (chemistry=$CHEMISTRY)..."
 
         cellranger count \
             --id="$LIBRARY_ID" \
@@ -139,6 +173,7 @@ run_cellranger_count() {
             --sample="$LIBRARY_ID" \
             --localcores="$N_THREADS" \
             --create-bam=false \
+            "${CHEMISTRY_ARGS[@]}" \
             > "${LIBRARY_ID}.log"
     )
 }
@@ -150,7 +185,7 @@ if [[ "$INPUT_MODE" == "sra" ]]; then
         local RUN_ID="$1"
         local LIBRARY_ID="$2"
         local LANE_ID="$3"
-        local SRA_FILE="$4"
+        local SRA_FILE=$(echo "$4" | tr -d '\r' | xargs)
         local FASTQ_LIBRARY_DIR="$5"
 
         local TMP_RUN_DIR="$FASTQ_DATA/_tmp_${RUN_ID}"
@@ -187,13 +222,13 @@ if [[ "$INPUT_MODE" == "sra" ]]; then
             fi
         done < <(find "$TMP_RUN_DIR" -maxdepth 1 -type f -name "*.fastq" | sort -V)
 
-        i_cnt=1
-        for f in "${indices[@]}"; do
-            mv "$f" "$FASTQ_LIBRARY_DIR/${LIBRARY_ID}_S1_${LANE_ID}_I${i_cnt}_001.fastq"
-            i_cnt=$((i_cnt + 1))
-        done
-
         if [ ${#reads[@]} -eq 2 ]; then
+            i_cnt=1
+            for f in "${indices[@]}"; do
+                mv "$f" "$FASTQ_LIBRARY_DIR/${LIBRARY_ID}_S1_${LANE_ID}_I${i_cnt}_001.fastq"
+                i_cnt=$((i_cnt + 1))
+            done
+
             rA="${reads[0]}"
             rB="${reads[1]}"
             
@@ -210,8 +245,47 @@ if [[ "$INPUT_MODE" == "sra" ]]; then
                 mv "$rA" "$FASTQ_LIBRARY_DIR/${LIBRARY_ID}_S1_${LANE_ID}_R1_001.fastq"
                 mv "$rB" "$FASTQ_LIBRARY_DIR/${LIBRARY_ID}_S1_${LANE_ID}_R2_001.fastq"
             fi
+        elif [ ${#reads[@]} -eq 1 ] && [ ${#indices[@]} -eq 3 ]; then
+            local BARCODE_FASTQ=""
+            local UMI_FASTQ=""
+            local INDEX_FASTQ=""
+            local INDEX_COUNT=0
+
+            for f in "${indices[@]}"; do
+                LEN=$(awk 'NR==2 {print length($0); exit}' "$f")
+
+                if [ "$LEN" -eq 14 ]; then
+                    BARCODE_FASTQ="$f"
+                elif [ "$LEN" -eq 10 ]; then
+                    UMI_FASTQ="$f"
+                elif [ "$LEN" -eq 8 ]; then
+                    INDEX_FASTQ="$f"
+                    INDEX_COUNT=$((INDEX_COUNT + 1))
+                fi
+            done
+
+            if [[ -n "$BARCODE_FASTQ" && -n "$UMI_FASTQ" && -n "$INDEX_FASTQ" && "$INDEX_COUNT" -eq 1 ]]; then
+                echo "  -> Detected split 10x v1 reads (14bp barcode + 10bp UMI + 8bp sample index + cDNA). Renaming as SC3Pv1 FASTQs..."
+
+                mv "${reads[0]}" "$FASTQ_LIBRARY_DIR/${LIBRARY_ID}_S1_${LANE_ID}_R1_001.fastq"
+                mv "$UMI_FASTQ" "$FASTQ_LIBRARY_DIR/${LIBRARY_ID}_S1_${LANE_ID}_R2_001.fastq"
+                mv "$BARCODE_FASTQ" "$FASTQ_LIBRARY_DIR/${LIBRARY_ID}_S1_${LANE_ID}_I1_001.fastq"
+                mv "$INDEX_FASTQ" "$FASTQ_LIBRARY_DIR/${LIBRARY_ID}_S1_${LANE_ID}_I2_001.fastq"
+                CELLRANGER_CHEMISTRY="SC3Pv1"
+            else
+                echo "  Error: Expected split 10x v1 lengths 14/10/8 plus one cDNA read for $RUN_ID"
+                for f in "${indices[@]}" "${reads[@]}"; do
+                    LEN=$(awk 'NR==2 {print length($0); exit}' "$f")
+                    echo "    $(basename "$f"): ${LEN:-0}bp"
+                done
+                exit 1
+            fi
         else
             echo "  Error: Expected 2 read files (>=20bp), found ${#reads[@]} for $RUN_ID"
+            for f in "${indices[@]}" "${reads[@]}"; do
+                LEN=$(awk 'NR==2 {print length($0); exit}' "$f")
+                echo "    $(basename "$f"): ${LEN:-0}bp"
+            done
             exit 1
         fi
 
@@ -233,21 +307,24 @@ if [[ "$INPUT_MODE" == "sra" ]]; then
 
         rm -rf "$FASTQ_LIBRARY_DIR"
         mkdir -p "$FASTQ_LIBRARY_DIR"
+        CELLRANGER_CHEMISTRY="auto"
 
-        awk -F'\t' -v lid="$LIBRARY_ID" '
-            NR > 1 && $2 == lid {
-                print $1 "\t" $5 "\t" $6
-            }
-        ' "$RUN_MANIFEST" | while IFS=$'\t' read -r RUN_ID LANE_ID SRA_FILE; do
+        while IFS=$'\t' read -r RUN_ID LANE_ID SRA_FILE; do
             convert_sra_one_run \
                 "$RUN_ID" \
                 "$LIBRARY_ID" \
                 "$LANE_ID" \
                 "$SRA_FILE" \
                 "$FASTQ_LIBRARY_DIR"
-        done
+        done < <(
+            awk -F'\t' -v lid="$LIBRARY_ID" '
+                NR > 1 && $2 == lid {
+                    print $1 "\t" $5 "\t" $6
+                }
+            ' "$RUN_MANIFEST"
+        )
 
-        if run_cellranger_count "$LIBRARY_ID" "$FASTQ_LIBRARY_DIR"; then
+        if run_cellranger_count "$LIBRARY_ID" "$FASTQ_LIBRARY_DIR" "$CELLRANGER_CHEMISTRY"; then
             echo "  -> Cell Ranger finished"
             rm -rf "$FASTQ_LIBRARY_DIR"
         else
@@ -297,6 +374,83 @@ elif [[ "$INPUT_MODE" == "local" ]]; then
 
         if run_cellranger_count "$LIBRARY_ID" "$FASTQ_LIBRARY_DIR"; then
             echo "  -> Cell Ranger finished. Cleaning FASTQ..."
+            rm -rf "$FASTQ_LIBRARY_DIR"
+        else
+            echo "  -> Warning: Cell Ranger failed"
+            exit 1
+        fi
+
+        count=$((count + 1))
+    done < "$LIBRARY_LIST"
+
+elif [[ "$INPUT_MODE" == "immport" ]]; then
+    echo "=== [PART 2] ImmPort mode: per-library symlink staging + Cell Ranger ==="
+
+    stage_fastq_library() {
+        local LIBRARY_ID="$1"
+        local FASTQ_LIBRARY_DIR="$2"
+        local STAGED_COUNT=0
+
+        rm -rf "$FASTQ_LIBRARY_DIR"
+        mkdir -p "$FASTQ_LIBRARY_DIR"
+
+        while IFS=$'\t' read -r SOURCE_PATH CELLRANGER_FASTQ_NAME; do
+            if [[ ! -f "$SOURCE_PATH" ]]; then
+                echo "  Error: FASTQ file not found: $SOURCE_PATH"
+                exit 1
+            fi
+
+            ln -sf "$SOURCE_PATH" "$FASTQ_LIBRARY_DIR/$CELLRANGER_FASTQ_NAME"
+            STAGED_COUNT=$((STAGED_COUNT + 1))
+        done < <(
+            awk -F'\t' -v lid="$LIBRARY_ID" -v key="$IMMPORT_KEY" -v fastq_dir="$PROJECT_FASTQ_DIR" '
+                NR == 1 {
+                    for (i = 1; i <= NF; i++) h[$i] = i
+                    next
+                }
+                (key == "" || $(h["ARM Name"]) == key) {
+                    source = $(h["File Name"])
+                    dest = $(h["Original File Name"])
+                    if (dest == "") dest = source
+                    sub(/\.fastq\.[0-9]+\.gz$/, ".fastq.gz", dest)
+                    sub(/\.fq\.[0-9]+\.gz$/, ".fq.gz", dest)
+
+                    lib = dest
+                    sub(/_S[0-9]+_L[0-9]+_[RI][0-9]_001\.(fastq|fq)\.gz$/, "", lib)
+                    if (lib == lid) print fastq_dir "/" source "\t" dest
+                }
+            ' "$FASTQ_METADATA_FILE"
+        )
+
+        if [[ "$STAGED_COUNT" -eq 0 ]]; then
+            echo "  Error: no FASTQ records found in $FASTQ_METADATA_FILE for $LIBRARY_ID"
+            exit 1
+        fi
+    }
+
+    count=1
+    while IFS= read -r LIBRARY_ID; do
+        echo "[ImmPort] $count / $TOTAL_COUNT : $LIBRARY_ID"
+
+        FASTQ_LIBRARY_DIR="$FASTQ_DATA/$LIBRARY_ID"
+        OUTPUT_PATH="$CELLRANGER_DIR/$LIBRARY_ID"
+
+        if [[ -d "$OUTPUT_PATH/outs" ]]; then
+            echo "  -> Cell Ranger output exists. Skipping."
+            count=$((count + 1))
+            continue
+        fi
+
+        echo "  -> Staging Cell Ranger-compatible FASTQ symlinks..."
+        stage_fastq_library "$LIBRARY_ID" "$FASTQ_LIBRARY_DIR"
+
+        if ! ls "$FASTQ_LIBRARY_DIR"/*_R1_001.fastq.gz >/dev/null 2>&1; then
+            echo "  Error: no R1 FASTQ found after staging: $FASTQ_LIBRARY_DIR"
+            exit 1
+        fi
+
+        if run_cellranger_count "$LIBRARY_ID" "$FASTQ_LIBRARY_DIR"; then
+            echo "  -> Cell Ranger finished. Cleaning staged FASTQ symlinks..."
             rm -rf "$FASTQ_LIBRARY_DIR"
         else
             echo "  -> Warning: Cell Ranger failed"
@@ -459,11 +613,13 @@ with h5py.File(sys.argv[1], "r") as f:
     count=$((count + 1))
 done < "$LIBRARY_LIST"
 
+# ==========================================
+# [PART 4] scDblFinder
+# ==========================================
 
 echo "=== [PART 4] Starting scDblFinder Doublet Detection ==="
 
 SUMMARY_CSV="$SCDBLFINDER_DIR/summary_scdblfinder.csv"
-mkdir -p "$SCDBLFINDER_DIR"
 
 SCDBLFINDER_R_SCRIPT="$ROOT_DIR/R/scdblfinder.R"
 SCDBLFINDER_PYTHON_SCRIPT="$ROOT_DIR/pipeline/utils/single_cell/scdblfinder.py"
@@ -504,6 +660,9 @@ for f in "$SCDBLFINDER_DIR"/*/*_summary.csv; do
     [[ -f "$f" ]] && tail -n +2 "$f" >> "$SUMMARY_CSV"
 done
 
+# ==========================================
+# [PART 5] Merging each h5ad files
+# ==========================================
 
 echo "=== [PART 5] Merging all clean .h5ad files ==="
 

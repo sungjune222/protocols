@@ -13,27 +13,18 @@ class Args(argparse.Namespace):
     output_dir: str
     library_manifest: str
     sra_xml: str
-
+    multiome: bool
 
 def parse_args() -> Args:
     parser = argparse.ArgumentParser(
         description="Merge clean h5ad files into a single project file"
     )
-    parser.add_argument(
-        "--input_dir", required=True, help="Directory containing sample subdirectories"
-    )
-    parser.add_argument(
-        "--project_id", required=True, help="Project ID for naming the output file"
-    )
-    parser.add_argument(
-        "--output_dir", required=True, help="Directory to save the merged file"
-    )
-    parser.add_argument(
-        "--library_manifest", default="", help="Path to the library manifest file"
-    )
-    parser.add_argument(
-        "--sra_xml", default="", help="Path to the SRA metadata XML file"
-    )
+    parser.add_argument("--input_dir", required=True)
+    parser.add_argument("--project_id", required=True)
+    parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--library_manifest", default="")
+    parser.add_argument("--sra_xml", default="")
+    parser.add_argument("--multiome", action="store_true")
     return parser.parse_args(namespace=Args())
 
 def add_value(d: dict[str, str], key: str, value: str) -> None:
@@ -45,13 +36,12 @@ def add_value(d: dict[str, str], key: str, value: str) -> None:
         raise ValueError(
             f"Metadata conflict for key='{key}': existing='{d[key]}', new='{value}'"
         )
-
     d[key] = value
 
 def parse_metadata_xml(xml_path: str) -> dict[str, dict[str, str]]:
     if not xml_path:
         return {}
-    
+
     tree = ET.parse(xml_path)
     root = tree.getroot()
     run_to_meta: dict[str, dict[str, str]] = {}
@@ -70,25 +60,52 @@ def parse_metadata_xml(xml_path: str) -> dict[str, dict[str, str]]:
 
         for run in pkg.findall("./RUN_SET/RUN"):
             run_acc = (run.get("accession") or "").strip()
-            if not run_acc:
-                continue
-            run_to_meta[run_acc] = dict(base_meta)
+            if run_acc:
+                run_to_meta[run_acc] = dict(base_meta)
 
     return run_to_meta
 
-def read_library_manifest(library_manifest_path: str):
-    if not library_manifest_path:
+def read_library_manifest(path: str, multiome: bool):
+    if not path:
         return {}
 
-    df = pd.read_csv(library_manifest_path, sep="\t", dtype=str).fillna("")
-    return {
-        row["library_id"]: {
-            "sample_id": row["sample_id"],
-            "experiment": row["experiment"],
-            "runs": row["runs"],
-        }
-        for _, row in df.iterrows()
-    }
+    df = pd.read_csv(path, sep="\t", dtype=str).fillna("")
+    cols = {c.lower(): c for c in df.columns}
+
+    def col(name: str) -> str:
+        if name.lower() not in cols:
+            raise ValueError(f"Missing column in library_manifest: {name}")
+        return cols[name.lower()]
+
+    out = {}
+
+    if multiome:
+        for _, row in df.iterrows():
+            library_id = row[col("library_id")]
+            gex_exp = row[col("gex_experiment")]
+            atac_exp = row[col("atac_experiment")]
+            gex_runs = row[col("gex_runs")]
+            atac_runs = row[col("atac_runs")]
+
+            out[library_id] = {
+                "sample_id": library_id,
+                "experiment": f"{gex_exp};{atac_exp}",
+                "runs": ",".join(x for x in [gex_runs, atac_runs] if x),
+                "gex_experiment": gex_exp,
+                "atac_experiment": atac_exp,
+                "gex_runs": gex_runs,
+                "atac_runs": atac_runs,
+            }
+    else:
+        for _, row in df.iterrows():
+            library_id = row[col("library_id")]
+            out[library_id] = {
+                "sample_id": row[col("sample_id")],
+                "experiment": row[col("experiment")],
+                "runs": row[col("runs")],
+            }
+
+    return out
 
 def merge_run_metadata(runs: str, run_to_meta: dict[str, dict[str, str]]) -> dict[str, str]:
     merged: dict[str, str] = {}
@@ -132,14 +149,15 @@ def main():
 
     print(f"=== Merging samples for Project: {args.project_id} ===")
 
-    library_manifest = read_library_manifest(args.library_manifest)
+    library_manifest = read_library_manifest(args.library_manifest, args.multiome)
     sra_xml = parse_metadata_xml(args.sra_xml)
 
-    search_pattern = os.path.join(args.input_dir, "**", "*_clean.h5ad")
-    files = sorted(glob.glob(search_pattern, recursive=True))
-
+    files = sorted(
+        glob.glob(os.path.join(args.input_dir, "**", "*_clean.h5ad"), recursive=True)
+    )
     if not files:
         raise FileNotFoundError(f"No '*_clean.h5ad' files found in {args.input_dir}")
+
     print(f"Found {len(files)} files to merge.")
 
     adatas = []
@@ -147,28 +165,30 @@ def main():
     alias_to_sample: dict[str, str] = {}
 
     for file_path in files:
-        file_name = os.path.basename(file_path)
-        library_id = file_name.replace("_clean.h5ad", "")
+        library_id = os.path.basename(file_path).replace("_clean.h5ad", "")
+        print(f"  -> Loading {library_id}...")
 
-        print(f"  -> Loading {library_id} from {file_name}...")
         adata = sc.read_h5ad(file_path)
-
         adata.obs["project_id"] = args.project_id
         adata.obs["library_id"] = library_id
 
         if library_id in library_manifest:
-            sample_id = library_manifest[library_id]["sample_id"]
-            experiment = library_manifest[library_id]["experiment"]
-            runs = library_manifest[library_id]["runs"]
+            info = library_manifest[library_id]
 
-            adata.obs["sample"] = sample_id
-            adata.obs["experiment"] = experiment
+            adata.obs["sample"] = info["sample_id"]
+            adata.obs["experiment"] = info["experiment"]
 
-            meta = merge_run_metadata(runs, sra_xml)
+            if args.multiome:
+                adata.obs["gex_experiment"] = info["gex_experiment"]
+                adata.obs["atac_experiment"] = info["atac_experiment"]
+                adata.obs["gex_runs"] = info["gex_runs"]
+                adata.obs["atac_runs"] = info["atac_runs"]
+
+            meta = merge_run_metadata(info["runs"], sra_xml)
             alias = meta.get("alias", "")
 
             check_sample_alias_mapping(
-                sample_id=sample_id,
+                sample_id=info["sample_id"],
                 alias=alias,
                 library_id=library_id,
                 sample_to_alias=sample_to_alias,
@@ -178,31 +198,45 @@ def main():
             for key, value in meta.items():
                 adata.obs[key] = value
 
-        adata.obs_names = adata.obs_names.astype(str) + f"-{library_id}"
+        adata.obs_names = adata.obs_names.astype(str) + f"-{library_id}" #type: ignore
         adatas.append(adata)
 
     print("Concatenating h5ad objects...")
-    combined_adata = anndata.concat(adatas, join="outer", merge="same")
+    combined_adata = anndata.concat(adatas, join="outer", merge="first")
 
     if not isinstance(combined_adata.X, csr_matrix):
         combined_adata.X = csr_matrix(combined_adata.X)
 
-    combined_adata.obs["project_id"] = combined_adata.obs["project_id"].astype("category")
-    combined_adata.obs["library_id"] = combined_adata.obs["library_id"].astype("category")
-
-    if "sample" in combined_adata.obs.columns:
-        combined_adata.obs["sample"] = combined_adata.obs["sample"].astype("category")
-
-    if "experiment" in combined_adata.obs.columns:
-        combined_adata.obs["experiment"] = combined_adata.obs["experiment"].astype("category")
+    assert isinstance(combined_adata.obs, pd.DataFrame)
+    for col in [
+        "project_id",
+        "library_id",
+        "sample",
+        "experiment",
+        "gex_experiment",
+        "atac_experiment",
+    ]:
+        if col in combined_adata.obs.columns:
+            combined_adata.obs[col] = combined_adata.obs[col].astype("category")
 
     output_path = os.path.join(args.output_dir, f"{args.project_id}.h5ad")
     print(f"Saving merged file to {output_path}...")
     combined_adata.write_h5ad(output_path, compression="gzip")
 
-    print(f"=== Merge completed successfully ===")
+    print("=== Merge completed successfully ===")
     print(f"Total cells: {combined_adata.n_obs}")
-    print(f"Total genes: {combined_adata.n_vars}")
+    if args.multiome:
+        if "feature_types" not in combined_adata.var.columns:
+            raise ValueError("`feature_types` column not found in merged multiome h5ad.")
+
+        feature_counts = combined_adata.var["feature_types"].value_counts()
+        n_genes = int(feature_counts.get("Gene Expression", 0))
+        n_peaks = int(feature_counts.get("Peaks", 0))
+
+        print(f"Total genes: {n_genes}")
+        print(f"Total peaks: {n_peaks}")
+    else:
+        print(f"Total genes: {combined_adata.n_vars}")
     print(f"Libraries: {combined_adata.obs['library_id'].nunique()}")
 
 if __name__ == "__main__":

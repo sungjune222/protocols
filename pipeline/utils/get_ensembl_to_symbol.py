@@ -3,12 +3,18 @@ import pickle
 import pyranges as pr
 from pipeline.utils.env import find_env_dir
 
-def get_ensg_to_symbol(force_update=False):
+def get_ensg_to_symbol(force_update=False, version="GRCh37"):
+    if version not in ["GRCh37", "GRCh38"]:
+        raise ValueError(f"Invalid version: '{version}'. Version must be either 'GRCh37' or 'GRCh38'")
+    
     root_dir = find_env_dir("ROOT_DIR")
     cache_dir = os.path.join(root_dir, "references", "processed")
-    cache_path = os.path.join(cache_dir, "ensg_to_symbol.pkl")
+    cache_path = os.path.join(cache_dir, f"ensg_to_symbol_{version}.pkl")
     
-    gtf_path = os.path.join(root_dir, "references", "raw", "Homo_sapiens.GRCh38.115.gtf")
+    if version == "GRCh37":
+        gtf_path = os.path.join(root_dir, "references", "raw", "Homo_sapiens.GRCh37.75.gtf")
+    else:
+        gtf_path = os.path.join(root_dir, "references", "raw", "Homo_sapiens.GRCh38.116.gtf")
 
     if os.path.exists(cache_path) and not force_update:
         with open(cache_path, "rb") as f:

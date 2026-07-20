@@ -217,12 +217,67 @@ build_cellranger_ref \
     "calJac240_pri"
 
 # ==========================================
+# 4. Downloading cellranger-arc References
+# ==========================================
+
+function download_cellranger_arc_ref() {
+    local REFERENCE_NAME="$1"
+    local ARCHIVE_URL="$2"
+
+    local ARCHIVE_NAME="${ARCHIVE_URL##*/}"
+    local ARCHIVE_FILE="$REF_DIR/$ARCHIVE_NAME"
+
+    local SC_MULTIOMICS_REF_ROOT="$ROOT_DIR/references/sc_multiomics"
+    local OUTPUT_REFERENCE="$SC_MULTIOMICS_REF_ROOT/$REFERENCE_NAME"
+    local EXTRACTED_REFERENCE="$SC_MULTIOMICS_REF_ROOT/${ARCHIVE_NAME%.tar.gz}"
+
+    mkdir -p "$SC_MULTIOMICS_REF_ROOT"
+
+    if [ -d "$OUTPUT_REFERENCE" ]; then
+        echo "Cell Ranger ARC reference '$REFERENCE_NAME' already exists"
+        return
+    fi
+
+    if [ ! -f "$ARCHIVE_FILE" ]; then
+        echo "Downloading Cell Ranger ARC reference: $REFERENCE_NAME"
+        wget -O "$ARCHIVE_FILE" "$ARCHIVE_URL"
+    fi
+
+    echo "Extracting Cell Ranger ARC reference: $REFERENCE_NAME"
+    [ -d "$EXTRACTED_REFERENCE" ] || tar -xzf "$ARCHIVE_FILE" -C "$SC_MULTIOMICS_REF_ROOT"
+
+    if [ "$EXTRACTED_REFERENCE" != "$OUTPUT_REFERENCE" ] && [ -d "$EXTRACTED_REFERENCE" ]; then
+        mv "$EXTRACTED_REFERENCE" "$OUTPUT_REFERENCE"
+    fi
+
+    if [ ! -d "$OUTPUT_REFERENCE" ]; then
+        echo "Error: failed to install Cell Ranger ARC reference '$REFERENCE_NAME'"
+        exit 1
+    fi
+}
+
+# Homo sapiens (human) GRCh38.p13
+download_cellranger_arc_ref \
+    "GRCh38" \
+    "https://cf.10xgenomics.com/supp/cell-arc/refdata-cellranger-arc-GRCh38-2024-A.tar.gz"
+
+# Mus musculus (house mouse) GRCm39
+download_cellranger_arc_ref \
+    "GRCm39" \
+    "https://cf.10xgenomics.com/supp/cell-arc/refdata-cellranger-arc-GRCm39-2024-A.tar.gz"
+
+# ==========================================
 # 5. Downloading Ensembl GTF 
 # ==========================================
-# Homo Sapiens
+# Homo Sapiens - GRCh38
 download_reference \
-    "https://ftp.ensembl.org/pub/release-115/gtf/homo_sapiens" \
-    "Homo_sapiens.GRCh38.115.gtf.gz" 
+    "https://ftp.ensembl.org/pub/release-116/gtf/homo_sapiens" \
+    "Homo_sapiens.GRCh38.116.gtf.gz" 
+
+# Homo Sapiens - GRCh37
+download_reference \
+    "https://ftp.ensembl.org/pub/release-75/gtf/homo_sapiens" \
+    "Homo_sapiens.GRCh37.75.gtf.gz" 
 
 # Mus Musculus
 download_reference \
