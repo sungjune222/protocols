@@ -36,11 +36,11 @@ if (!all(c("LibraryID", "FilteredH5") %in% colnames(tab))) {
 keep_gex <- function(sce, library_id) {
   rd <- as.data.frame(rowData(sce))
 
-  if (!"feature_types" %in% colnames(rd)) {
+  if (!"Type" %in% colnames(rd)) {
     return(sce)
   }
 
-  keep <- as.character(rd[["feature_types"]]) == "Gene Expression"
+  keep <- as.character(rd[["Type"]]) == "Gene Expression"
   if (!any(keep)) {
     stop(
       sprintf("No Gene Expression features found in %s", library_id)

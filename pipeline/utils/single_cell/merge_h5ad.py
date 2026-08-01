@@ -11,6 +11,8 @@ class Args(argparse.Namespace):
     input_dir: str
     project_id: str
     output_dir: str
+    output_name: str
+    cell_id_separator: str
     library_manifest: str
     sra_xml: str
     multiome: bool
@@ -22,6 +24,8 @@ def parse_args() -> Args:
     parser.add_argument("--input_dir", required=True)
     parser.add_argument("--project_id", required=True)
     parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--output_name", default="")
+    parser.add_argument("--cell_id_separator", default="___")
     parser.add_argument("--library_manifest", default="")
     parser.add_argument("--sra_xml", default="")
     parser.add_argument("--multiome", action="store_true")
@@ -81,14 +85,14 @@ def read_library_manifest(path: str, multiome: bool):
 
     if multiome:
         for _, row in df.iterrows():
-            library_id = row[col("library_id")]
+            sample_id = row[col("sample_id")]
             gex_exp = row[col("gex_experiment")]
             atac_exp = row[col("atac_experiment")]
             gex_runs = row[col("gex_runs")]
             atac_runs = row[col("atac_runs")]
 
-            out[library_id] = {
-                "sample_id": library_id,
+            out[sample_id] = {
+                "sample_id": sample_id,
                 "experiment": f"{gex_exp};{atac_exp}",
                 "runs": ",".join(x for x in [gex_runs, atac_runs] if x),
                 "gex_experiment": gex_exp,
@@ -147,6 +151,16 @@ def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
+    output_name = args.output_name or f"{args.project_id}.h5ad"
+    if os.path.basename(output_name) != output_name:
+        raise ValueError("--output_name must be a file name, not a path.")
+    if not args.cell_id_separator:
+        raise ValueError("--cell_id_separator cannot be empty.")
+
+    output_path = os.path.join(args.output_dir, output_name)
+    if os.path.exists(output_path):
+        raise FileExistsError(f"Refusing to overwrite existing output: {output_path}")
+
     print(f"=== Merging samples for Project: {args.project_id} ===")
 
     library_manifest = read_library_manifest(args.library_manifest, args.multiome)
@@ -167,8 +181,22 @@ def main():
     for file_path in files:
         library_id = os.path.basename(file_path).replace("_clean.h5ad", "")
         print(f"  -> Loading {library_id}...")
+        if args.cell_id_separator in library_id:
+            raise ValueError(
+                f"Library ID '{library_id}' contains cell ID separator "
+                f"'{args.cell_id_separator}'"
+            )
 
         adata = sc.read_h5ad(file_path)
+
+        original_barcodes = adata.obs_names.astype(str)
+        if any(args.cell_id_separator in x for x in original_barcodes):
+            raise ValueError(
+                f"Cell ID separator occurs in a barcode from {file_path}: "
+                f"{args.cell_id_separator!r}"
+            )
+
+        adata.obs["orig_barcode"] = original_barcodes
         adata.obs["project_id"] = args.project_id
         adata.obs["library_id"] = library_id
 
@@ -198,11 +226,13 @@ def main():
             for key, value in meta.items():
                 adata.obs[key] = value
 
-        adata.obs_names = adata.obs_names.astype(str) + f"-{library_id}" #type: ignore
+        adata.obs_names = original_barcodes + args.cell_id_separator + library_id #type: ignore
         adatas.append(adata)
 
     print("Concatenating h5ad objects...")
     combined_adata = anndata.concat(adatas, join="outer", merge="first")
+    if not combined_adata.obs_names.is_unique:
+        raise ValueError("Canonical cell IDs are not unique after merging")
 
     if not isinstance(combined_adata.X, csr_matrix):
         combined_adata.X = csr_matrix(combined_adata.X)
@@ -219,24 +249,12 @@ def main():
         if col in combined_adata.obs.columns:
             combined_adata.obs[col] = combined_adata.obs[col].astype("category")
 
-    output_path = os.path.join(args.output_dir, f"{args.project_id}.h5ad")
     print(f"Saving merged file to {output_path}...")
     combined_adata.write_h5ad(output_path, compression="gzip")
 
     print("=== Merge completed successfully ===")
     print(f"Total cells: {combined_adata.n_obs}")
-    if args.multiome:
-        if "feature_types" not in combined_adata.var.columns:
-            raise ValueError("`feature_types` column not found in merged multiome h5ad.")
-
-        feature_counts = combined_adata.var["feature_types"].value_counts()
-        n_genes = int(feature_counts.get("Gene Expression", 0))
-        n_peaks = int(feature_counts.get("Peaks", 0))
-
-        print(f"Total genes: {n_genes}")
-        print(f"Total peaks: {n_peaks}")
-    else:
-        print(f"Total genes: {combined_adata.n_vars}")
+    print(f"Total genes: {combined_adata.n_vars}")
     print(f"Libraries: {combined_adata.obs['library_id'].nunique()}")
 
 if __name__ == "__main__":

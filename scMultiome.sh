@@ -32,14 +32,24 @@ export PATH="$CELLRANGER_ARC_PATH:$PATH"
 PROJECT_ROOT_DIR="$DATA_DIR/$PROJECT_ID"
 
 CELLRANGER_ARC_DIR="$PROJECT_ROOT_DIR/cellranger-arc"
-CELLBENDER_DIR="$PROJECT_ROOT_DIR/cellbender"
-SCDBLFINDER_DIR="$PROJECT_ROOT_DIR/scdblfinder"
+CELLBENDER_DIR="$PROJECT_ROOT_DIR/cellbender_gex"
+SCDBLFINDER_DIR="$PROJECT_ROOT_DIR/scdblfinder_gex"
+SNAPATAC_DIR="$PROJECT_ROOT_DIR/snapatac2"
 META_DIR="$PROJECT_ROOT_DIR/meta_data"
+
+ARC_REFERENCE_DIR="$ROOT_DIR/references/sc_multiomics/$REFERENCE_GENOME"
+CHROM_SIZES="$ARC_REFERENCE_DIR/fasta/genome.fa.fai"
+GENE_ANNOTATION="$ARC_REFERENCE_DIR/genes/genes.gtf.gz"
 
 mkdir -p "$CELLRANGER_ARC_DIR"
 mkdir -p "$CELLBENDER_DIR"
 mkdir -p "$SCDBLFINDER_DIR"
 mkdir -p "$META_DIR"
+
+[[ -f "$CHROM_SIZES" && -f "$GENE_ANNOTATION" ]] || {
+    echo "Error: SnapATAC2 reference files are missing under $ARC_REFERENCE_DIR"
+    exit 1
+}
 
 LIBRARY_LIST="$META_DIR/library_list.txt"
 : > "$LIBRARY_LIST"
@@ -110,7 +120,10 @@ fi
 
 arc_outs_complete() {
     local OUTS_DIR="$1"
-    [[ -f "$OUTS_DIR/raw_feature_bc_matrix.h5" && -f "$OUTS_DIR/filtered_feature_bc_matrix.h5" && -f "$OUTS_DIR/summary.csv" ]]
+    [[ -f "$OUTS_DIR/raw_feature_bc_matrix.h5" \
+        && -f "$OUTS_DIR/filtered_feature_bc_matrix.h5" \
+        && -f "$OUTS_DIR/atac_fragments.tsv.gz" \
+        && -f "$OUTS_DIR/summary.csv" ]]
 }
 
 run_cellranger_arc_count() {
@@ -118,7 +131,9 @@ run_cellranger_arc_count() {
     local LIBRARIES_CSV="$2"
 
     if [[ -d "$CELLRANGER_ARC_DIR/$LIBRARY_ID" ]] && ! arc_outs_complete "$CELLRANGER_ARC_DIR/$LIBRARY_ID/outs"; then
-        rm -rf "$CELLRANGER_ARC_DIR/$LIBRARY_ID"
+        echo "Error: incomplete Cell Ranger ARC output exists; refusing to delete it:"
+        echo "  $CELLRANGER_ARC_DIR/$LIBRARY_ID"
+        return 1
     fi
 
     (
@@ -147,10 +162,9 @@ if [[ "$INPUT_MODE" == "sra" ]]; then
         local SRA_FILE=$(echo "$6" | tr -d '\r' | xargs)
         local FASTQ_ASSAY_DIR="$7"
 
-        local TMP_RUN_DIR="$FASTQ_DATA/_tmp_${RUN_ID}"
-
-        rm -rf "$TMP_RUN_DIR"
-        mkdir -p "$TMP_RUN_DIR" "$FASTQ_ASSAY_DIR"
+        local TMP_RUN_DIR
+        TMP_RUN_DIR=$(mktemp -d "$FASTQ_DATA/.${RUN_ID}.XXXXXX")
+        mkdir -p "$FASTQ_ASSAY_DIR"
 
         if [[ ! -f "$SRA_FILE" ]]; then
             echo "  Error: SRA file not found: $SRA_FILE"
@@ -264,7 +278,7 @@ if [[ "$INPUT_MODE" == "sra" ]]; then
             exit 1
         fi
 
-        rm -rf "$TMP_RUN_DIR"
+        rmdir "$TMP_RUN_DIR"
     }
 
     write_libraries_csv() {
@@ -360,18 +374,17 @@ if [[ "$INPUT_MODE" == "sra" ]]; then
         count=$((count + 1))
     done
 fi
+
 # ==========================================
 # [PART 3] CellBender on ARC raw H5
 # ==========================================
 
 echo "=== [PART 3] Starting CellBender on ARC raw H5 ==="
 
-MULTIOME_DIR="$PROJECT_ROOT_DIR/multiome_clean"
-mkdir -p "$MULTIOME_DIR"
-
 DOCKER_DIR="$ROOT_DIR/docker"
 CB_DOCKERFILE="cellbender.Dockerfile"
 CB_IMAGE_NAME="cellbender:pipeline"
+EXTRACT_GEX_SCRIPT="$ROOT_DIR/pipeline/utils/single_cell/extract_gex_from_h5.py"
 
 function prepare_docker_image() {
     local IMG_NAME=$1
@@ -411,52 +424,47 @@ while IFS= read -r LIBRARY_ID; do
     ARC_SUMMARY_CSV="$ARC_OUTS/summary.csv"
 
     SAMPLE_CB_DIR="$CELLBENDER_DIR/$LIBRARY_ID"
-    CB_FILTERED_FILE="$SAMPLE_CB_DIR/${LIBRARY_ID}_filtered.h5"
+    GEX_RAW_H5="$SAMPLE_CB_DIR/${LIBRARY_ID}_gex_raw.h5"
+    GEX_CB_FILTERED="$SAMPLE_CB_DIR/${LIBRARY_ID}_gex_filtered.h5"
     mkdir -p "$SAMPLE_CB_DIR"
 
-    if [[ -f "$CB_FILTERED_FILE" ]]; then
-        echo "  -> Existing CellBender output found. Reusing."
-        echo "$LIBRARY_ID,$CB_FILTERED_FILE" >> "$CB_SUCCESS_CSV"
-        echo "$LIBRARY_ID,REUSE_EXISTING,OK,N/A,N/A,$CB_FILTERED_FILE" >> "$CB_STATUS_CSV"
+    if [[ -s "$GEX_CB_FILTERED" ]]; then
+        echo "  -> Existing GEX-only CellBender output found. Reusing."
+        echo "$LIBRARY_ID,$GEX_CB_FILTERED" >> "$CB_SUCCESS_CSV"
+        echo "$LIBRARY_ID,REUSE_EXISTING,OK,N/A,N/A,$GEX_CB_FILTERED" >> "$CB_STATUS_CSV"
         count=$((count + 1)); continue
     fi
 
-    if [[ ! -f "$ARC_RAW_H5" ]]; then
+    if [[ ! -s "$ARC_RAW_H5" ]]; then
         echo "$LIBRARY_ID,SKIP,ARC_RAW_INPUT_MISSING,N/A,N/A," >> "$CB_STATUS_CSV"
         count=$((count + 1)); continue
     fi
 
     METRICS=$("$PIXI_EXEC" run python3 - "$ARC_SUMMARY_CSV" <<'PY'
 import csv, os, sys
-summary_csv = sys.argv[1]
 
-def parse_intlike(x):
-    x = str(x).replace(',', '').strip()
-    if not x or x.upper() == 'NA':
-        return 'NA'
+def as_int(x):
     try:
-        return str(int(float(x)))
+        return str(int(float(str(x).replace(",", "").strip())))
     except Exception:
-        return 'NA'
-
-def get_any(row, names):
-    row_lc = {str(k).strip().lower(): v for k, v in row.items()}
-    for name in names:
-        v = row_lc.get(name.lower())
-        if v not in (None, ''):
-            return v
-    return ''
+        return "NA"
 
 row = {}
-if os.path.isfile(summary_csv):
-    with open(summary_csv, newline='') as f:
+if os.path.isfile(sys.argv[1]):
+    with open(sys.argv[1], newline="") as f:
         row = next(csv.DictReader(f), {})
 
-print(parse_intlike(get_any(row, [
-    'Estimated number of cells',
-    'Estimated Number of Cells',
-    'Estimated number of cells - Gene Expression',
-])))
+lookup = {str(k).strip().lower(): v for k, v in row.items()}
+for key in (
+    "estimated number of cells - gene expression",
+    "estimated number of cells",
+):
+    value = lookup.get(key)
+    if value not in (None, ""):
+        print(as_int(value))
+        break
+else:
+    print("NA")
 PY
 )
 
@@ -467,42 +475,49 @@ PY
 
     TOTAL_BARCODES=$("$PIXI_EXEC" run python3 - "$ARC_RAW_H5" <<'PY'
 import h5py, sys
-with h5py.File(sys.argv[1], 'r') as f:
-    print(len(f['matrix']['barcodes']))
+with h5py.File(sys.argv[1], "r") as f:
+    print(f["matrix/barcodes"].shape[0])
 PY
 )
 
-    AUTO_TOTAL_DROPLETS=$(( METRICS * 3 ))
-    [[ "$AUTO_TOTAL_DROPLETS" -lt 15000 ]] && AUTO_TOTAL_DROPLETS=15000
-    [[ "$AUTO_TOTAL_DROPLETS" -gt "$TOTAL_BARCODES" ]] && AUTO_TOTAL_DROPLETS="$TOTAL_BARCODES"
+    AUTO_TOTAL_DROPLETS=$((METRICS * 3))
+    (( AUTO_TOTAL_DROPLETS < 15000 )) && AUTO_TOTAL_DROPLETS=15000
+    (( AUTO_TOTAL_DROPLETS > TOTAL_BARCODES )) && AUTO_TOTAL_DROPLETS="$TOTAL_BARCODES"
 
-    echo "  -> expected_cells=$METRICS total_droplets=$AUTO_TOTAL_DROPLETS total_barcodes=$TOTAL_BARCODES"
-    if docker run --rm --gpus all \
-        -v "$ARC_OUTS":/input:ro \
-        -v "$SAMPLE_CB_DIR":/output \
-        -u "$(id -u):$(id -g)" \
-        -e MPLCONFIGDIR=/tmp \
-        -e HOME=/tmp \
-        "$CB_IMAGE_NAME" \
-        remove-background \
-        --input /input/raw_feature_bc_matrix.h5 \
-        --output /output/$LIBRARY_ID.h5 \
-        --cuda \
-        --expected-cells "$METRICS" \
-        --total-droplets-included "$AUTO_TOTAL_DROPLETS" \
-        --exclude-feature-types Peaks \
-        --fpr 0.01 \
-        --epochs 150
-    then
-        if [[ -f "$CB_FILTERED_FILE" ]]; then
-            echo "$LIBRARY_ID,$CB_FILTERED_FILE" >> "$CB_SUCCESS_CSV"
-            echo "$LIBRARY_ID,SUCCESS,OK,$METRICS,$TOTAL_BARCODES,$CB_FILTERED_FILE" >> "$CB_STATUS_CSV"
-        else
-            echo "$LIBRARY_ID,EXCLUDE,FILTERED_OUTPUT_MISSING,$METRICS,$TOTAL_BARCODES," >> "$CB_STATUS_CSV"
-        fi
-    else
-        echo "$LIBRARY_ID,EXCLUDE,CELLBENDER_FAILED,$METRICS,$TOTAL_BARCODES," >> "$CB_STATUS_CSV"
+    "$PIXI_EXEC" run python3 "$EXTRACT_GEX_SCRIPT" \
+        --input "$ARC_RAW_H5" \
+        --output "$GEX_RAW_H5"
+
+    echo "  -> expected_cells=$METRICS total_droplets=$AUTO_TOTAL_DROPLETS"
+
+    if [[ ! -s "$GEX_CB_FILTERED" ]]; then
+        docker run --rm --gpus all \
+            -v "$SAMPLE_CB_DIR":/work \
+            -w /work \
+            -u "$(id -u):$(id -g)" \
+            -e MPLCONFIGDIR=/tmp \
+            -e HOME=/tmp \
+            "$CB_IMAGE_NAME" \
+            remove-background \
+            --input "/work/${LIBRARY_ID}_gex_raw.h5" \
+            --output "/work/${LIBRARY_ID}_gex.h5" \
+            --cuda \
+            --expected-cells "$METRICS" \
+            --total-droplets-included "$AUTO_TOTAL_DROPLETS" \
+            --fpr 0.01 \
+            --epochs 150 || {
+                echo "$LIBRARY_ID,EXCLUDE,CELLBENDER_FAILED,$METRICS,$TOTAL_BARCODES," >> "$CB_STATUS_CSV"
+                exit 1
+            }
     fi
+
+    [[ -s "$GEX_CB_FILTERED" ]] || {
+        echo "$LIBRARY_ID,EXCLUDE,GEX_FILTERED_OUTPUT_MISSING,$METRICS,$TOTAL_BARCODES," >> "$CB_STATUS_CSV"
+        exit 1
+    }
+
+    echo "$LIBRARY_ID,$GEX_CB_FILTERED" >> "$CB_SUCCESS_CSV"
+    echo "$LIBRARY_ID,SUCCESS,OK,$METRICS,$TOTAL_BARCODES,$GEX_CB_FILTERED" >> "$CB_STATUS_CSV"
 
     count=$((count + 1))
 done < "$LIBRARY_LIST"
@@ -517,60 +532,139 @@ SUMMARY_CSV="$SCDBLFINDER_DIR/summary_scdblfinder.csv"
 SCDBLFINDER_R_SCRIPT="$ROOT_DIR/R/scdblfinder.R"
 SCDBLFINDER_PYTHON_SCRIPT="$ROOT_DIR/pipeline/utils/single_cell/scdblfinder.py"
 
-"$PIXI_EXEC" run Rscript "$SCDBLFINDER_R_SCRIPT" \
-    --manifest "$CB_SUCCESS_CSV" \
-    --outdir "$SCDBLFINDER_DIR" \
-    --threads 2 \
-    --dbr_per1k 0.008 \
-    --seed 1
+SCDBL_COMPLETE=true
+while IFS= read -r LIBRARY_ID; do
+    [[ -f "$SCDBLFINDER_DIR/$LIBRARY_ID/${LIBRARY_ID}_singlet_barcodes.csv" \
+        && -f "$SCDBLFINDER_DIR/$LIBRARY_ID/${LIBRARY_ID}_summary.csv" \
+        && -f "$SCDBLFINDER_DIR/$LIBRARY_ID/${LIBRARY_ID}_clean.h5ad" ]] \
+        || SCDBL_COMPLETE=false
+done < "$LIBRARY_LIST"
 
-while IFS=, read -r LIBRARY_ID INPUT_TARGET || [[ -n "${LIBRARY_ID:-}" ]]; do
-    [[ -z "${LIBRARY_ID:-}" || "$LIBRARY_ID" == "LibraryID" ]] && continue
+if [[ "$SCDBL_COMPLETE" == true ]]; then
+    echo "  -> Complete scDblFinder outputs found. Reusing."
+else
+    "$PIXI_EXEC" run Rscript "$SCDBLFINDER_R_SCRIPT" \
+        --manifest "$CB_SUCCESS_CSV" \
+        --outdir "$SCDBLFINDER_DIR" \
+        --threads 2 \
+        --dbr_per1k 0.008 \
+        --seed 1
 
-    OUTDIR="$SCDBLFINDER_DIR/$LIBRARY_ID"
-    SINGLET_CSV="$OUTDIR/${LIBRARY_ID}_singlet_barcodes.csv"
-    CLEAN_H5AD="$OUTDIR/${LIBRARY_ID}_clean.h5ad"
+    while IFS=, read -r LIBRARY_ID INPUT_TARGET || [[ -n "${LIBRARY_ID:-}" ]]; do
+        [[ -z "${LIBRARY_ID:-}" || "$LIBRARY_ID" == "LibraryID" ]] && continue
 
-    if [[ ! -f "$INPUT_TARGET" || ! -f "$SINGLET_CSV" ]]; then
-        echo "  -> Skip $LIBRARY_ID: input or singlet barcode file missing"
-        continue
-    fi
+        OUTDIR="$SCDBLFINDER_DIR/$LIBRARY_ID"
+        SINGLET_CSV="$OUTDIR/${LIBRARY_ID}_singlet_barcodes.csv"
 
-    if [[ -f "$CLEAN_H5AD" ]]; then
-        echo "  -> Existing clean h5ad found for $LIBRARY_ID. Reusing."
-        continue
-    fi
+        [[ -f "$INPUT_TARGET" && -f "$SINGLET_CSV" ]] || {
+            echo "Error: input or singlet barcode file missing for $LIBRARY_ID"
+            exit 1
+        }
 
-    "$PIXI_EXEC" run python3 "$SCDBLFINDER_PYTHON_SCRIPT" \
-        --input "$INPUT_TARGET" \
-        --singlets "$SINGLET_CSV" \
-        --outdir "$OUTDIR" \
-        --sample_id "$LIBRARY_ID" \
-        --multiome
-done < "$CB_SUCCESS_CSV"
+        "$PIXI_EXEC" run python3 "$SCDBLFINDER_PYTHON_SCRIPT" \
+            --input "$INPUT_TARGET" \
+            --singlets "$SINGLET_CSV" \
+            --outdir "$OUTDIR" \
+            --sample_id "$LIBRARY_ID"
+    done < "$CB_SUCCESS_CSV"
 
-echo "LibraryID,TotalCells,RemovedZeroCountCells,PredictedDoublets,PredictedSinglets,ObservedDoubletFraction,ExpectedDoubletFraction,dbr_per1k,scDblFinderVersion,Status,Note" > "$SUMMARY_CSV"
-
-for f in "$SCDBLFINDER_DIR"/*/*_summary.csv; do
-    [[ -f "$f" ]] && tail -n +2 "$f" >> "$SUMMARY_CSV"
-done
+    echo "LibraryID,TotalCells,RemovedZeroCountCells,PredictedDoublets,PredictedSinglets,ObservedDoubletFraction,ExpectedDoubletFraction,dbr_per1k,scDblFinderVersion,Status,Note" > "$SUMMARY_CSV"
+    for f in "$SCDBLFINDER_DIR"/*/*_summary.csv; do
+        [[ -f "$f" ]] && tail -n +2 "$f" >> "$SUMMARY_CSV"
+    done
+fi
 
 # ==========================================
-# [PART 5] Merge clean multiome h5ad files
+# [PART 5] Merge GEX-only h5ad files
 # ==========================================
 
-echo "=== [PART 5] Merging clean multiome h5ad files ==="
+echo "=== [PART 5] Merging clean GEX-only h5ad files ==="
 
 MERGE_SCRIPT="$ROOT_DIR/pipeline/utils/single_cell/merge_h5ad.py"
 H5AD_MATRIX_DIR="$ROOT_DIR/$MERGED_H5AD"
+RNA_H5AD="$H5AD_MATRIX_DIR/${PROJECT_ID}_rna.h5ad"
 
 "$PIXI_EXEC" run python3 "$MERGE_SCRIPT" \
     --input_dir "$SCDBLFINDER_DIR" \
     --project_id "$PROJECT_ID" \
     --output_dir "$H5AD_MATRIX_DIR" \
+    --output_name "${PROJECT_ID}_rna.h5ad" \
     --library_manifest "$LIBRARY_MANIFEST" \
     --sra_xml "$SRA_XML" \
     --multiome
 
-echo "  -> Clean multiome h5ad: $H5AD_MATRIX_DIR/$PROJECT_ID.h5ad"
-echo "Pipeline completed!!!"
+# ==========================================
+# [PART 6] SnapATAC2 de novo peaks + paired SCENIC+ files
+# ==========================================
+
+echo "=== [PART 6] Calling de novo peaks with SnapATAC2 ==="
+echo $LIBRARY_LIST
+SNAPATAC_SCRIPT="$ROOT_DIR/pipeline/utils/single_cell/snapatac.py"
+if [[ -f "$SNAPATAC_DIR/_SUCCESS" ]]; then
+    echo "  -> Completed SnapATAC2 output found. Reusing."
+else
+    "$PIXI_EXEC" run python3 "$SNAPATAC_SCRIPT" \
+        --cellranger-arc-dir "$CELLRANGER_ARC_DIR" \
+        --project-id "$PROJECT_ID" \
+        --library-list "$LIBRARY_LIST" \
+        --scdblfinder-dir "$SCDBLFINDER_DIR" \
+        --rna-h5ad "$RNA_H5AD" \
+        --outdir "$SNAPATAC_DIR" \
+        --chrom-sizes "$CHROM_SIZES" \
+        --gene-annotation "$GENE_ANNOTATION"
+fi
+
+# ==========================================
+# [PART 7] SCENIC+
+# ==========================================
+
+echo "=== [PART 7] Starting pycisTopic & SCENIC+ ==="
+
+SCENICPLUS_DOCKER_IMAGE="scenicplus-local:1.0a2"
+SCENICPLUS_DOCKERFILE="$ROOT_DIR/docker/scenicplus.Dockerfile"
+
+SCENICPLUS_INPUT_DIR="$SNAPATAC_DIR/scenic_input"
+SCENICPLUS_DIR="$PROJECT_ROOT_DIR/scenicplus"
+SCENICPLUS_SCRIPT="$ROOT_DIR/pipeline/utils/single_cell/scenicplus_prepare.py"
+
+echo "=== [Docker Check] Image: $SCENICPLUS_DOCKER_IMAGE ==="
+if ! docker image inspect "$SCENICPLUS_DOCKER_IMAGE" >/dev/null 2>&1 
+then
+    echo "  -> Building local SCENIC+ image..."
+    docker buildx build \
+        --load \
+        --build-arg SCENICPLUS_REF=v1.0a2 \
+        -t "$SCENICPLUS_DOCKER_IMAGE" \
+        -f "$SCENICPLUS_DOCKERFILE" \
+        "$ROOT_DIR" || {
+            echo "Error: SCENIC+ Docker build failed!"
+            exit 1
+        }
+    echo "  -> Build complete."
+else
+    echo "  -> Image found. Skipping build."
+fi
+
+docker run --rm \
+    -u "$(id -u):$(id -g)" \
+    -v "$ROOT_DIR:$ROOT_DIR" \
+    -v "$SNAPATAC_DIR:$SNAPATAC_DIR" \
+    -v "$PROJECT_ROOT_DIR:$PROJECT_ROOT_DIR" \
+    -w "$ROOT_DIR" \
+    -e MPLCONFIGDIR=/tmp \
+    -e HOME=/tmp \
+    -e NUMBA_CACHE_DIR=/tmp \
+    -e MALLET_MEMORY=48g \
+    "$SCENICPLUS_DOCKER_IMAGE" \
+    python3 "$SCENICPLUS_SCRIPT" \
+        --input-dir "$SCENICPLUS_INPUT_DIR" \
+        --outdir "$SCENICPLUS_DIR" \
+        --threads "$N_THREADS" \
+        --project-id "$PROJECT_ID" || {
+            echo "Error: SCENIC+ execution failed in Docker!"
+            exit 1
+        }
+
+echo "  -> GEX-only RNA: $RNA_H5AD"
+echo "  -> Paired SCENIC+ input: $SCENICPLUS_INPUT_DIR"
+echo "Pipeline completed."

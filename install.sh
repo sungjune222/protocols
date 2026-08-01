@@ -9,7 +9,7 @@ rm cuda-keyring_1.1-1_all.deb.1
 sudo apt update
 sudo apt install -y cuda-toolkit-13-0
 
-sudo apt install -y docker.io
+sudo apt install -y docker.io docker-buildx
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
   && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
     sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#' | \
