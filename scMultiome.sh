@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+shopt -s nullglob
 
 ENV_FILE="./.env"
 if [ -f "$ENV_FILE" ]; then
@@ -31,20 +32,17 @@ export PATH="$CELLRANGER_ARC_PATH:$PATH"
 
 PROJECT_ROOT_DIR="$DATA_DIR/$PROJECT_ID"
 
+META_DIR="$PROJECT_ROOT_DIR/meta_data"
 CELLRANGER_ARC_DIR="$PROJECT_ROOT_DIR/cellranger-arc"
 CELLBENDER_DIR="$PROJECT_ROOT_DIR/cellbender_gex"
 SCDBLFINDER_DIR="$PROJECT_ROOT_DIR/scdblfinder_gex"
 SNAPATAC_DIR="$PROJECT_ROOT_DIR/snapatac2"
-META_DIR="$PROJECT_ROOT_DIR/meta_data"
+SCPLUS_DIR="$PROJECT_ROOT_DIR/scenicplus"
+mkdir -p "$META_DIR" "$CELLRANGER_ARC_DIR" "$CELLBENDER_DIR" "$SCDBLFINDER_DIR"
 
 ARC_REFERENCE_DIR="$ROOT_DIR/references/sc_multiomics/$REFERENCE_GENOME"
 CHROM_SIZES="$ARC_REFERENCE_DIR/fasta/genome.fa.fai"
 GENE_ANNOTATION="$ARC_REFERENCE_DIR/genes/genes.gtf.gz"
-
-mkdir -p "$CELLRANGER_ARC_DIR"
-mkdir -p "$CELLBENDER_DIR"
-mkdir -p "$SCDBLFINDER_DIR"
-mkdir -p "$META_DIR"
 
 [[ -f "$CHROM_SIZES" && -f "$GENE_ANNOTATION" ]] || {
     echo "Error: SnapATAC2 reference files are missing under $ARC_REFERENCE_DIR"
@@ -600,42 +598,39 @@ RNA_H5AD="$H5AD_MATRIX_DIR/${PROJECT_ID}_rna.h5ad"
 echo "=== [PART 6] Calling de novo peaks with SnapATAC2 ==="
 echo $LIBRARY_LIST
 SNAPATAC_SCRIPT="$ROOT_DIR/pipeline/utils/single_cell/snapatac.py"
-if [[ -f "$SNAPATAC_DIR/_SUCCESS" ]]; then
-    echo "  -> Completed SnapATAC2 output found. Reusing."
-else
-    "$PIXI_EXEC" run python3 "$SNAPATAC_SCRIPT" \
-        --cellranger-arc-dir "$CELLRANGER_ARC_DIR" \
-        --project-id "$PROJECT_ID" \
-        --library-list "$LIBRARY_LIST" \
-        --scdblfinder-dir "$SCDBLFINDER_DIR" \
-        --rna-h5ad "$RNA_H5AD" \
-        --outdir "$SNAPATAC_DIR" \
-        --chrom-sizes "$CHROM_SIZES" \
-        --gene-annotation "$GENE_ANNOTATION"
-fi
+
+"$PIXI_EXEC" run python3 "$SNAPATAC_SCRIPT" \
+    --cellranger-arc-dir "$CELLRANGER_ARC_DIR" \
+    --project-id "$PROJECT_ID" \
+    --library-list "$LIBRARY_LIST" \
+    --scdblfinder-dir "$SCDBLFINDER_DIR" \
+    --rna-h5ad "$RNA_H5AD" \
+    --outdir "$SNAPATAC_DIR" \
+    --chrom-sizes "$CHROM_SIZES" \
+    --gene-annotation "$GENE_ANNOTATION"
 
 # ==========================================
-# [PART 7] SCENIC+
+# [PART 7] Building cisTopic and cisTarget databases for SCENIC+ analysis
 # ==========================================
 
-echo "=== [PART 7] Starting pycisTopic & SCENIC+ ==="
+echo "=== [PART 7] Building cisTopic and cisTarget databases for SCENIC+ analysis ==="
 
-SCENICPLUS_DOCKER_IMAGE="scenicplus-local:1.0a2"
-SCENICPLUS_DOCKERFILE="$ROOT_DIR/docker/scenicplus.Dockerfile"
+SCPLUS_DOCKER_IMAGE="scenicplus-local:1.0a2-fdr"
+SCPLUS_DOCKERFILE="$ROOT_DIR/docker/scenicplus.Dockerfile"
+SCPLUS_GSEA_FDR=1
 
-SCENICPLUS_INPUT_DIR="$SNAPATAC_DIR/scenic_input"
-SCENICPLUS_DIR="$PROJECT_ROOT_DIR/scenicplus"
-SCENICPLUS_SCRIPT="$ROOT_DIR/pipeline/utils/single_cell/scenicplus_prepare.py"
+SNAPATAC_OUTPUT_DIR="$SNAPATAC_DIR/scenic_input"
+SCPLUS_CISTOPIC_SCRIPT="$ROOT_DIR/pipeline/utils/single_cell/scenicplus_cistopic.py"
 
-echo "=== [Docker Check] Image: $SCENICPLUS_DOCKER_IMAGE ==="
-if ! docker image inspect "$SCENICPLUS_DOCKER_IMAGE" >/dev/null 2>&1 
+echo "=== [Docker Check] Image: $SCPLUS_DOCKER_IMAGE ==="
+if ! docker image inspect "$SCPLUS_DOCKER_IMAGE" >/dev/null 2>&1
 then
     echo "  -> Building local SCENIC+ image..."
     docker buildx build \
         --load \
-        --build-arg SCENICPLUS_REF=v1.0a2 \
-        -t "$SCENICPLUS_DOCKER_IMAGE" \
-        -f "$SCENICPLUS_DOCKERFILE" \
+        --build-arg SCPLUS_REF=v1.0a2 \
+        -t "$SCPLUS_DOCKER_IMAGE" \
+        -f "$SCPLUS_DOCKERFILE" \
         "$ROOT_DIR" || {
             echo "Error: SCENIC+ Docker build failed!"
             exit 1
@@ -645,26 +640,226 @@ else
     echo "  -> Image found. Skipping build."
 fi
 
-docker run --rm \
-    -u "$(id -u):$(id -g)" \
-    -v "$ROOT_DIR:$ROOT_DIR" \
-    -v "$SNAPATAC_DIR:$SNAPATAC_DIR" \
-    -v "$PROJECT_ROOT_DIR:$PROJECT_ROOT_DIR" \
-    -w "$ROOT_DIR" \
-    -e MPLCONFIGDIR=/tmp \
-    -e HOME=/tmp \
-    -e NUMBA_CACHE_DIR=/tmp \
-    -e MALLET_MEMORY=48g \
-    "$SCENICPLUS_DOCKER_IMAGE" \
-    python3 "$SCENICPLUS_SCRIPT" \
-        --input-dir "$SCENICPLUS_INPUT_DIR" \
-        --outdir "$SCENICPLUS_DIR" \
-        --threads "$N_THREADS" \
-        --project-id "$PROJECT_ID" || {
-            echo "Error: SCENIC+ execution failed in Docker!"
-            exit 1
-        }
+run_scplus() {
+    local workdir="$1"
+    shift
+
+    docker run --rm \
+        -u "$(id -u):$(id -g)" \
+        -v "$ROOT_DIR:$ROOT_DIR" \
+        -v "$PROJECT_ROOT_DIR:$PROJECT_ROOT_DIR" \
+        -w "$workdir" \
+        -e MPLCONFIGDIR=/tmp \
+        -e HOME=/tmp \
+        -e NUMBA_CACHE_DIR=/tmp \
+        -e MALLET_MEMORY=48g \
+        -e SCPLUS_GSEA_FDR="$SCPLUS_GSEA_FDR" \
+        "$SCPLUS_DOCKER_IMAGE" \
+        "$@"
+}
+
+if [[ -f "$SCPLUS_DIR/cistopic_obj.pkl" ]]; then
+    echo "  -> Existing SCENIC+ output found. Reusing."
+else
+    echo "  -> Running SCENIC+ in Docker..."
+    run_scplus "$ROOT_DIR" \
+        python3 "$SCPLUS_CISTOPIC_SCRIPT" \
+            --input-dir "$SNAPATAC_OUTPUT_DIR" \
+            --outdir "$SCPLUS_DIR" \
+            --threads "$N_THREADS" \
+            --additional-topics \
+            --project-id "$PROJECT_ID" || {
+                echo "Error: SCENIC+ execution failed in Docker!"
+                exit 1
+            }
+fi
 
 echo "  -> GEX-only RNA: $RNA_H5AD"
-echo "  -> Paired SCENIC+ input: $SCENICPLUS_INPUT_DIR"
-echo "Pipeline completed."
+
+while true; do
+    echo "Please enter the absolute path of the celltype annotated GEX-only h5ad file:"
+    read CELL_TYPE_ANNOTATED_H5AD
+
+    if [ -f "$CELL_TYPE_ANNOTATED_H5AD" ]; then
+        break
+    else
+        echo "  -> Error: File not found. Please check the path and try again."
+    fi
+done
+
+SCPLUS_PREPARE_SCRIPT="$ROOT_DIR/pipeline/utils/single_cell/scenicplus_prepare.py"
+CISTOPIC_PATH="$SCPLUS_DIR/cistopic_obj.pkl"
+SCPLUS_REGION_SET_DIR="$SCPLUS_DIR/region_sets"
+SCPLUS_INPUT_REGION="$SCPLUS_REGION_SET_DIR/input_region"
+SCPLUS_PROJECT_DIR="$SCPLUS_DIR/projects"
+
+for PATH_REQUIRED in "$CELL_TYPE_ANNOTATED_H5AD" "$CISTOPIC_PATH" "$SCPLUS_REGION_SET_DIR"
+do
+    [[ -e "$PATH_REQUIRED" ]] || {
+        echo "Error: Required SCENIC+ input not found: $PATH_REQUIRED"
+        exit 1
+    }
+done
+
+while true; do
+    echo "Please enter the celltype (e.g., Microglia):"
+    read CELLTYPE
+
+    SCPLUS_CELLTYPE_DIR="$SCPLUS_PROJECT_DIR/${CELLTYPE// /_}"
+    SCPLUS_INPUT_DIR="$SCPLUS_CELLTYPE_DIR/input"
+    mkdir -p "$SCPLUS_INPUT_DIR"
+
+    SCPLUS_FOCUSED_GEX="$SCPLUS_INPUT_DIR/focused_GEX.h5ad"
+    SCPLUS_MUDATA="$SCPLUS_INPUT_DIR/GEX_ACC.h5mu"
+    if [[ -s "$SCPLUS_FOCUSED_GEX" && -s "$SCPLUS_MUDATA" ]]; then
+        echo "  -> Existing SCENIC+ input found, Reusing"
+        break
+    fi
+
+    VALID_CELLTYPE=$(run_scplus "$ROOT_DIR" \
+        python3 "$SCPLUS_PREPARE_SCRIPT" \
+            --gex-in "$CELL_TYPE_ANNOTATED_H5AD" \
+            --gex-out "$SCPLUS_FOCUSED_GEX" \
+            --mudata-out "$SCPLUS_MUDATA" \
+            --cistopic "$CISTOPIC_PATH" \
+            --celltype "$CELLTYPE" \
+            --regions-in-dir "$SCPLUS_REGION_SET_DIR" \
+            --regions-out-dir "$SCPLUS_INPUT_REGION")
+
+    if [[ "$VALID_CELLTYPE" == *"True"* ]]; then
+        break
+    fi
+done
+
+SCPLUS_REFERENCE_DIR="$SCPLUS_DIR/reference"
+CTX_DB="$SCPLUS_REFERENCE_DIR/$REFERENCE_GENOME.regions_vs_motifs.rankings.feather"
+DEM_DB="$SCPLUS_REFERENCE_DIR/$REFERENCE_GENOME.regions_vs_motifs.scores.feather"
+MOTIF_ANNOTATION="$SCPLUS_REFERENCE_DIR/motifs-v10nr_clust-nr.${REFERENCE_GENOME}-m0.001-o0.0.tbl"
+
+if [[ ! -s "$CTX_DB" || ! -s "$DEM_DB" || ! -s "$MOTIF_ANNOTATION" ]]; then
+    echo "  -> Creating custom cisTarget database..."
+    SCPLUS_DB_TMP=$(mktemp -d "$SCPLUS_DIR/.cistarget.XXXXXX")
+    trap 'rm -rf -- "$SCPLUS_DB_TMP"' EXIT
+    mkdir "$SCPLUS_DB_TMP/output"
+    awk 'BEGIN { OFS="\t" } { print $1, $2, $3 }' \
+        "$SCPLUS_INPUT_REGION/topics_top3k_otsu_intersection"/*.bed \
+        | LC_ALL=C sort -k1,1 -k2,2n -k3,3n -u \
+        > "$SCPLUS_DB_TMP/regions.bed"
+    cut -f1,2 "$CHROM_SIZES" > "$SCPLUS_DB_TMP/chrom.sizes"
+
+    docker run --rm \
+        -u "$(id -u):$(id -g)" \
+        -v "$ARC_REFERENCE_DIR/fasta:/genome:ro" \
+        -v "$SCPLUS_DB_TMP:/db" \
+        "$SCPLUS_DOCKER_IMAGE" \
+        /opt/create_cisTarget_databases/create_fasta_with_padded_bg_from_bed.sh \
+            /genome/genome.fa /db/chrom.sizes /db/regions.bed \
+            /db/regions.fa 1000 yes
+
+    docker run --rm \
+        -u "$(id -u):$(id -g)" \
+        -v "$SCPLUS_DB_TMP:/db" \
+        -v "$SCPLUS_DB_TMP/output:/out" \
+        "$SCPLUS_DOCKER_IMAGE" \
+        python /opt/create_cisTarget_databases/create_cistarget_motif_databases.py \
+            -f /db/regions.fa \
+            -M /opt/motif_singletons \
+            -m /opt/motifs.txt \
+            -o "/out/$REFERENCE_GENOME" \
+            -c /usr/local/bin/cbust \
+            -t "$N_THREADS" -b 1000 -s 1
+
+    if [[ "$REFERENCE_GENOME" == "GRCm39" ]]; then
+        curl -fsSL \
+            https://resources.aertslab.org/cistarget/motif2tf/motifs-v10nr_clust-nr.mgi-m0.001-o0.0.tbl \
+            -o "$SCPLUS_DB_TMP/output/$(basename "$MOTIF_ANNOTATION")"
+    elif [[ "$REFERENCE_GENOME" == "GRCh38" ]]; then
+        curl -fsSL \
+            https://resources.aertslab.org/cistarget/motif2tf/motifs-v10nr_clust-nr.hgnc-m0.001-o0.0.tbl \
+            -o "$SCPLUS_DB_TMP/output/$(basename "$MOTIF_ANNOTATION")"
+    else
+        echo "Error: Unsupported REFERENCE_GENOME '$REFERENCE_GENOME'"
+        exit 1
+    fi
+
+    for DB_PATH in "$CTX_DB" "$DEM_DB" "$MOTIF_ANNOTATION"
+    do
+        DB_FILE="$(basename "$DB_PATH")"
+        [[ -s "$SCPLUS_DB_TMP/output/$DB_FILE" ]] || exit 1
+    done
+
+    rm -rf "$SCPLUS_REFERENCE_DIR"
+    mv "$SCPLUS_DB_TMP/output" "$SCPLUS_REFERENCE_DIR"
+    rm -r "$SCPLUS_DB_TMP"
+    trap - EXIT
+fi
+
+# ==========================================
+# [PART 8] SCENIC+ analysis
+# ==========================================
+
+echo "=== [PART 8] SCENIC+ analysis ==="
+
+SCPLUS_SNAKEMAKE_DIR="$SCPLUS_CELLTYPE_DIR/Snakemake"
+if [[ ! -f "$SCPLUS_SNAKEMAKE_DIR/config/config.yaml" ]]; then
+    run_scplus "$ROOT_DIR" \
+        scenicplus init_snakemake --out_dir "$SCPLUS_CELLTYPE_DIR"
+fi
+
+SCPLUS_CONFIG_SCRIPT="$ROOT_DIR/pipeline/utils/single_cell/scenicplus_configure.py"
+SCPLUS_RESULT_DIR="$SCPLUS_CELLTYPE_DIR/results"
+SCPLUS_FDR_DIR="$SCPLUS_RESULT_DIR/fdr_0.05"
+
+for SCPLUS_GSEA_FDR in 1 0.05
+do
+    "$PIXI_EXEC" run python3 "$SCPLUS_CONFIG_SCRIPT" \
+        --reference-genome "$REFERENCE_GENOME" \
+        --config "$SCPLUS_SNAKEMAKE_DIR/config/config.yaml" \
+        --cistopic "$CISTOPIC_PATH" \
+        --gex "$SCPLUS_FOCUSED_GEX" \
+        --regions "$SCPLUS_INPUT_REGION" \
+        --mudata "$SCPLUS_MUDATA" \
+        --ctx-db "$CTX_DB" \
+        --dem-db "$DEM_DB" \
+        --motif-annotation "$MOTIF_ANNOTATION" \
+        --gtf "$GENE_ANNOTATION" \
+        --chrom-sizes "$CHROM_SIZES" \
+        --outdir "$SCPLUS_RESULT_DIR" \
+        --threads "$N_THREADS" \
+        --fdr "$SCPLUS_GSEA_FDR"
+
+    run_scplus "$SCPLUS_SNAKEMAKE_DIR" \
+        snakemake --cores "$N_THREADS" --latency-wait 60
+done
+
+for SCPLUS_OUTPUT_DIR in "$SCPLUS_RESULT_DIR" "$SCPLUS_FDR_DIR"
+do
+    for RESULT in "$SCPLUS_OUTPUT_DIR/eRegulons_direct.tsv" \
+        "$SCPLUS_OUTPUT_DIR/eRegulons_extended.tsv"
+    do
+        [[ -s "$RESULT" ]] || {
+            echo "Error: SCENIC+ result not found: $RESULT"
+            exit 1
+        }
+    done
+done
+
+echo "  -> Unfiltered results: $SCPLUS_RESULT_DIR"
+echo "  -> FDR < 0.05 results: $SCPLUS_FDR_DIR"
+
+while :; do
+    IFS= read -r -p "Please enter the target gene (e.g., Actb): " SCPLUS_TARGET_GENE
+    [[ "$SCPLUS_TARGET_GENE" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] && break
+    echo "Error: Invalid gene symbol."
+done
+
+SCPLUS_TARGET_SCRIPT="$ROOT_DIR/pipeline/utils/single_cell/scenicplus_target.py"
+
+for SCPLUS_OUTPUT_DIR in "$SCPLUS_RESULT_DIR" "$SCPLUS_FDR_DIR"
+do
+    "$PIXI_EXEC" run python3 "$SCPLUS_TARGET_SCRIPT" \
+        --direct "$SCPLUS_OUTPUT_DIR/eRegulons_direct.tsv" \
+        --extended "$SCPLUS_OUTPUT_DIR/eRegulons_extended.tsv" \
+        --gene "$SCPLUS_TARGET_GENE" \
+        --output "$SCPLUS_OUTPUT_DIR/${SCPLUS_TARGET_GENE}_network.tsv"
+done

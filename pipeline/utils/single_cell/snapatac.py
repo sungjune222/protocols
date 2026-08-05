@@ -87,6 +87,16 @@ def main() -> None:
     for path in (sample_dir, peak_call_dir, scenic_dir, temp_dir):
         path.mkdir(parents=True, exist_ok=True)
 
+    acc_path = scenic_dir / "ACC.h5ad"
+    gex_path = scenic_dir / "GEX.h5ad"
+    bed_path = scenic_dir / "consensus_peaks.bed"
+    fragment_path = scenic_dir / "fragments.tsv"
+
+    expected_outputs = [acc_path, gex_path, bed_path, fragment_path]
+    if all(output.is_file() for output in expected_outputs):
+        print(f"[*] All SnapATAC2 output files already exist. Skipping pipeline processing!")
+        return
+
     sample_files: list[tuple[str, Path]] = []
     fragment_manifest: list[dict[str, str]] = []
     opened: list[tuple[str, object]] = []
@@ -209,7 +219,7 @@ def main() -> None:
         raise ValueError("Consensus ATAC matrix contains duplicated cell IDs")
     write_bed(
         np.asarray(peak_matrix.var_names, dtype=str).tolist(),
-        scenic_dir / "consensus_peaks.bed",
+        bed_path,
     )
 
     rna = ad.read_h5ad(args.rna_h5ad)
@@ -227,11 +237,9 @@ def main() -> None:
     for column in rna.obs:
         peak_matrix.obs[column] = rna.obs[column].to_numpy()
 
-    acc_path = scenic_dir / "ACC.h5ad"
     peak_matrix_memory = peak_matrix.to_memory()
     peak_matrix_memory.write_h5ad(acc_path, compression="gzip")
     rna.raw = rna.copy()
-    gex_path = scenic_dir / "GEX.h5ad"
     rna.write_h5ad(gex_path, compression="gzip")
 
     final_libraries = set(rna.obs["library_id"].astype(str))
@@ -240,7 +248,7 @@ def main() -> None:
         if row["library_id"] in final_libraries
     ]
     pd.DataFrame(final_fragments).to_csv(
-        scenic_dir / "fragments.tsv", sep="\t", index=False
+        fragment_path, sep="\t", index=False
     )
 
     print(

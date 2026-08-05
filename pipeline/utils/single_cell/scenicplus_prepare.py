@@ -1,181 +1,125 @@
 import argparse
-import gc
-import logging
 import pickle
+import shutil
 import anndata as ad
-import numpy as np
 import pandas as pd
-from gensim import utils #type: ignore
 from pathlib import Path
-from pycisTopic.cistopic_class import create_cistopic_object #type: ignore
-from scenicplus.data_wrangling.adata_cistopic_wrangling import process_multiome_data #type: ignore
-from pycisTopic.lda_models import evaluate_models, run_cgs_models_mallet, LDAMallet #type: ignore
-from pycisTopic.topic_binarization import binarize_topics #type: ignore
-from pycisTopic.utils import region_names_to_coordinates #type: ignore
-from scipy import sparse
-
-# Alternative implementation of load_word_topics that reads the MALLET state file in chunks to reduce memory usage
-def load_word_topics_streaming(self, chunksize=300_000):
-    logger = logging.getLogger("LDAMalletWrapper")
-    logger.info("loading assigned topics from %s in chunks", self.fstate())
-    word_topics = np.zeros((self.num_topics, self.num_terms), dtype=np.float64)
-
-    with utils.open(self.fstate(), "rb") as fin:
-        next(fin)
-        self.alpha = np.fromiter(next(fin).split()[2:], dtype=float)
-
-    if len(self.alpha) != self.num_topics:
-        raise ValueError("Mismatch between MALLET and requested topics")
-
-    # MALLET state: 0=doc, 1=source, 2=pos, 3=typeindex, 4=type(region), 5=topic
-    for chunk in pd.read_csv(
-        self.fstate(),
-        sep=r"\s+",
-        header=None,
-        skiprows=3,
-        usecols=[4, 5],
-        dtype={
-            4: np.int32,
-            5: np.int32,
-        },
-        chunksize=chunksize,
-        compression="infer",
-    ):
-        regions = chunk.iloc[:, 0].to_numpy(copy=False)
-        topics = chunk.iloc[:, 1].to_numpy(copy=False)
-        np.add.at(word_topics, (topics, regions), 1)
-        
-    return word_topics
-
-LDAMallet.load_word_topics = load_word_topics_streaming
+from scenicplus.data_wrangling.adata_cistopic_wrangling import (  # type: ignore
+    process_multiome_data,
+)
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Build a selected cisTopic model and SCENIC+ region sets"
+    p = argparse.ArgumentParser()
+    p.add_argument("--gex-in", type=Path, required=True)
+    p.add_argument("--gex-out", type=Path, required=True)
+    p.add_argument("--mudata-out", type=Path, required=True)
+    p.add_argument("--cistopic", type=Path, required=True)
+    p.add_argument("--celltype", type=str, required=True)
+    p.add_argument("--regions-in-dir", type=Path, required=True)
+    p.add_argument("--regions-out-dir", type=Path, required=True)
+    p.add_argument("--cell-column", default="cell")
+    p.add_argument("--cell-id-separator", default="___")
+    return p.parse_args()
+
+def read_bed(path: Path) -> set[str]:
+    table = pd.read_csv(path, sep="\t", header=None, usecols=[0, 1, 2])
+    return set(
+        table[0].astype(str) + ":"
+        + table[1].astype(str) + "-"
+        + table[2].astype(str)
     )
-    parser.add_argument("--input-dir", type=Path, required=True)
-    parser.add_argument("--outdir", type=Path, required=True)
-    parser.add_argument("--project-id", required=True)
-    parser.add_argument("--threads", required=True)
-    parser.add_argument("--cell-id-separator", default="___")
-    return parser.parse_args()
 
-def write_region_sets(region_sets: dict, outdir: Path) -> None:
-    outdir.mkdir()
-    for name, regions in region_sets.items():
-        coordinates = region_names_to_coordinates(regions.index).sort_values(
-            ["Chromosome", "Start", "End"]
-        )
-        coordinates.to_csv(
-            outdir / f"{name}.bed",
-            sep="\t",
-            header=False,
-            index=False,
-        )
+def write_bed(regions: set[str], path: Path) -> None:
+    with path.open("w") as f:
+        for region in regions:
+            chrom, coords = region.split(":")
+            start, end = coords.split("-")
+            f.write(f"{chrom}\t{start}\t{end}\n")
 
-def main() -> None:
+def prepare_regions(input_dir: Path, output_dir: Path) -> set[str]:
+    top3k_dir = input_dir / "topics_top_3k"
+    otsu_dir = input_dir / "topics_otsu"
+    output_dir = output_dir / "topics_top3k_otsu_intersection"
+
+    top3k_beds = sorted(top3k_dir.glob("*.bed"))
+    if not top3k_beds:
+        raise FileNotFoundError(f"No BED files found in {top3k_dir}")
+
+    shutil.rmtree(output_dir, ignore_errors=True)
+    output_dir.mkdir(parents=True)
+
+    all_regions: set[str] = set()
+    for top3k_bed in top3k_beds:
+        otsu_bed = otsu_dir / top3k_bed.name
+        if not otsu_bed.is_file():
+            raise FileNotFoundError(otsu_bed)
+
+        overlap = read_bed(top3k_bed) & read_bed(otsu_bed)
+        if overlap:
+            write_bed(overlap, output_dir / top3k_bed.name)
+            all_regions.update(overlap)
+
+    if not all_regions:
+        raise ValueError("No overlapping top-3k/Otsu regions found")
+    return all_regions
+
+def main() -> bool:
     args = parse_args()
-    gex_path = args.input_dir / "GEX.h5ad"
-    acc_path = args.input_dir / "ACC.h5ad"
-    fragments_path = args.input_dir / "fragments.tsv"
-    for path in (gex_path, acc_path, fragments_path):
-        if not path.is_file():
+    for path in (args.gex_in, args.cistopic, args.regions_in_dir):
+        if not path.exists():
             raise FileNotFoundError(path)
 
-    separator = args.cell_id_separator
-    gex = ad.read_h5ad(gex_path)
-    acc = ad.read_h5ad(acc_path)
+    gex = ad.read_h5ad(args.gex_in, backed="r")
+    gex.obs_names = gex.obs_names.astype(str)  # type: ignore
+    if args.cell_column not in gex.obs:
+        raise ValueError(
+            f"{args.cell_column!r} is missing from GEX.obs"
+            f"Available columns: {list(gex.obs.columns)}"
+        )
 
-    gex.obs_names = gex.obs_names.astype(str) #type: ignore
-    acc.obs_names = acc.obs_names.astype(str) #type: ignore
-    if not gex.obs_names.equals(acc.obs_names):
-        raise ValueError("GEX and ACC cell IDs or order do not match.")
+    selected = gex.obs_names[
+        gex.obs[args.cell_column].astype(str).eq(args.celltype)
+    ]
+    if len(selected) == 0:
+        print(f"No cells found for cell type '{args.celltype}' in GEX.obs[{args.cell_column}]")
+        return False
 
-    fragments = pd.read_csv(fragments_path, sep="\t", dtype=str)
-    fragment_files = dict(zip(fragments["library_id"], fragments["fragment_file"]))
-    if not all(Path(path).is_file() for path in fragment_files.values()):
-        raise FileNotFoundError("A fragment file in fragments.tsv is missing")
-    library_ids = set(gex.obs["library_id"].astype(str))
-    if library_ids != set(fragment_files):
-        raise ValueError("GEX libraries do not match the fragment manifest")
+    with args.cistopic.open("rb") as handle:
+        cistopic = pickle.load(handle)
 
-    args.outdir.mkdir(parents=True)
-    matrix = sparse.csr_matrix(acc.X.T) #type: ignore
-    cistopic = create_cistopic_object(
-        fragment_matrix=matrix,
-        cell_names=acc.obs_names.tolist(),
-        region_names=acc.var_names.astype(str).tolist(), 
-        path_to_fragments=fragment_files,
-        project=args.project_id,
-        tag_cells=False,
-        split_pattern=separator,
+    cistopic_cells = set(map(str, cistopic.cell_names))
+    selected = selected[selected.isin(cistopic_cells)]
+
+    region_set = prepare_regions(args.regions_in_dir, args.regions_out_dir)
+    selected_regions = [r for r in cistopic.region_names if r in region_set]
+    if len(selected_regions) != len(region_set):
+        raise ValueError("Region sets and cisTopic peaks do not match")
+    
+    assert isinstance(gex.obs, pd.DataFrame)
+    cistopic.add_cell_data(
+        gex.obs.loc[selected].copy(),
+        split_pattern=args.cell_id_separator
     )
-    cell_data = gex.obs.copy()
-    cell_data["sample_id"] = cell_data["library_id"].astype(str) #type: ignore
-    cistopic.add_cell_data(cell_data, split_pattern=separator)
+    
+    focused_gex = gex[selected].to_memory()
+    gex.file.close()
+    focused_gex.write_h5ad(args.gex_out, compression="gzip")
 
-    n_cells = int(gex.n_obs)
-    n_genes = int(gex.n_vars)
-    n_regions = int(acc.n_vars)
-
-    del gex
-    del matrix
-    del acc
-    del cell_data
-    del fragments
-    gc.collect()
-
-    model_dir = args.outdir / "models"
-    model_dir.mkdir()
-    models = run_cgs_models_mallet(
-        cistopic,
-        n_topics=[2, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50],
-        n_cpu=args.threads, # increase to args.threads if you can afford the memory usage
-        n_iter=150,
-        random_state=0,
-        save_path=str(model_dir),
-    )
-    model = evaluate_models(
-        models,
-        select_model=None,
-        return_model=True,
-        plot=False,
-        save=str(args.outdir / "model_selection.pdf"),
-    )
-    cistopic.add_LDA_model(model)
-
-    cistopic_path = args.outdir / "cistopic_obj.pkl"
-    with cistopic_path.open("wb") as handle:
-        pickle.dump(cistopic, handle)
-
-    gex = ad.read_h5ad(gex_path)
-    mudata_path = args.outdir / f"{args.project_id}.h5mu"
     mdata = process_multiome_data(
-        GEX_anndata=gex,
+        GEX_anndata=focused_gex,
         cisTopic_obj=cistopic,
         use_raw_for_GEX_anndata=True,
+        imputed_acc_kwargs={"selected_regions": selected_regions},
         bc_transform_func=lambda x: x,
     )
-    mdata.write_h5mu(mudata_path)
+    mdata.write_h5mu(args.mudata_out)
 
-    otsu = binarize_topics(cistopic, method="otsu", plot=False)
-    top_n = min(3000, cistopic.fragment_matrix.shape[0])
-    top = binarize_topics(cistopic, method="ntop", ntop=top_n, plot=False)
-    region_root = args.outdir / "region_sets"
-    write_region_sets(otsu, region_root / "topics_otsu")
-    write_region_sets(top, region_root / "topics_top_3k")
-
-    ready = {
-        "cisTopic_obj_fname": "cistopic_obj.pkl",
-        "GEX_anndata_fname": str(gex_path.resolve()),
-        "region_set_folder": "region_sets",
-        "selected_topics": int(model.n_topic),
-        "n_cells": n_cells,
-        "n_genes": n_genes,
-        "n_regions": n_regions,
-    }
-    print(f"SCENIC+ inputs ready with {model.n_topic} selected topics")
-    print(ready)
+    print(
+        f"Prepared {args.celltype}: {len(selected)} cells, "
+        f"{len(selected_regions)} regions"
+    )
+    return True
 
 if __name__ == "__main__":
-    main()
+    valid_celltype = main()
+    print(valid_celltype)

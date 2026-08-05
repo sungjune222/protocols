@@ -159,7 +159,8 @@ def main():
 
     output_path = os.path.join(args.output_dir, output_name)
     if os.path.exists(output_path):
-        raise FileExistsError(f"Refusing to overwrite existing output: {output_path}")
+        print("Reusing existing merged output file")
+        return
 
     print(f"=== Merging samples for Project: {args.project_id} ===")
 

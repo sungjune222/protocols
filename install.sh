@@ -269,17 +269,17 @@ download_cellranger_arc_ref \
 # ==========================================
 # 5. Downloading Ensembl GTF 
 # ==========================================
-# Homo Sapiens - GRCh38
+# Homo Sapiens - GRCh38 release-116
 download_reference \
     "https://ftp.ensembl.org/pub/release-116/gtf/homo_sapiens" \
     "Homo_sapiens.GRCh38.116.gtf.gz" 
 
-# Homo Sapiens - GRCh37
+# Homo Sapiens - GRCh37 release-75
 download_reference \
     "https://ftp.ensembl.org/pub/release-75/gtf/homo_sapiens" \
     "Homo_sapiens.GRCh37.75.gtf.gz" 
 
-# Mus Musculus
+# Mus Musculus - GRCm39 release-115
 download_reference \
     "https://ftp.ensembl.org/pub/release-115/gtf/mus_musculus" \
     "Mus_musculus.GRCm39.115.gtf.gz" 
