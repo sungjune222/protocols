@@ -9,6 +9,7 @@ os.environ["OMP_NUM_THREADS"] = str(CPU_CORE_COUNT)
 os.environ["OPENBLAS_NUM_THREADS"] = str(CPU_CORE_COUNT)
 os.environ["MKL_NUM_THREADS"] = str(CPU_CORE_COUNT)
 
+import cupy as cp
 import numpy as np
 import pandas as pd
 import scvi
@@ -26,10 +27,10 @@ sc.settings.n_jobs = CPU_CORE_COUNT
 
 if __name__ == "__main__":
     pre_h5ad_dir = find_env_dir("PRE_H5AD")
-    MAIN_SERIES = "feng"
-    SUB_SERIES = ""
+    MAIN_SERIES = "pbmc_human"
+    SUB_SERIES = "tcell"
     SPECIES = "human"
-    leiden_resolution = 3.5
+    leiden_resolution = 2.0
     only_cpu = False
 
     if SUB_SERIES:
@@ -52,11 +53,7 @@ if __name__ == "__main__":
         # Marking mitochondrial and ribosomal genes
         mt_genes = extract_mt_genes(species=SPECIES)
         mt_mask = adata.var.index.isin(mt_genes)
-
-        ribo_url = "http://software.broadinstitute.org/gsea/msigdb/download_geneset.jsp?geneSetName=KEGG_RIBOSOME&fileType=txt"
-        ribo_genes = pd.read_table(ribo_url, skiprows=2, header=None)
-        ribo_genes_lower = set(ribo_genes[0].str.lower().values)
-        ribo_mask = adata.var.index.str.lower().isin(ribo_genes_lower)
+        ribo_mask = adata.var.index.str.upper().str.startswith(("RPS", "RPL"))
 
         adata.var["mt"] = np.asarray(mt_mask, dtype=bool)
         adata.var["ribo"] = np.asarray(ribo_mask, dtype=bool)
@@ -99,6 +96,9 @@ if __name__ == "__main__":
     filtered_adata = quality_assessed_adata[
         (quality_assessed_adata.obs["pct_counts_mt"] < 15)
     ].copy()
+    
+    del loaded_adata
+    del quality_assessed_adata
     gc.collect()
 
     if only_cpu:
@@ -127,9 +127,11 @@ if __name__ == "__main__":
         )        
         filtered_adata = fix_nullable_strings(filtered_adata)
 
-    scvi_adata = filtered_adata[:, filtered_adata.var["highly_variable"]].copy()
     if not only_cpu:
-        rsc.get.anndata_to_CPU(scvi_adata)
+        rsc.get.anndata_to_CPU(filtered_adata, convert_all=True)
+        gc.collect()
+        cp.get_default_memory_pool().free_all_blocks()
+    scvi_adata = filtered_adata[:, filtered_adata.var["highly_variable"]].copy()
     
     # Setting up AnnData for scVI model with batch effects
     scvi.model.SCVI.setup_anndata(

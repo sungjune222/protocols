@@ -527,3 +527,75 @@ def plot_proportions(
         os.path.join(proportions_plots_dir, filename), format=FIG_FORMAT, bbox_inches="tight"
     )
     plt.close("all")
+
+def plot_volcano(
+        deg: pd.DataFrame,
+        series: str,
+        name: str,
+        genes: List[str],
+        lfc_threshold: float = 0.5,
+        dot_size: int = 3,
+        text_size: int = 10,
+        xlim=(-5, 5),
+        ylim=(0, 50),
+    ):
+    volcano_plots_dir = find_env_dir("VOLCANO_PLOTS")
+    out_dir = os.path.join(volcano_plots_dir, series)
+    os.makedirs(out_dir, exist_ok=True)
+
+    df = deg.dropna(subset=["log2FoldChange_shrunk", "padj"]).copy()
+    df["logp"] = -np.log10(df["padj"].clip(lower=1e-300))
+
+    LFC = "log2FoldChange_shrunk"
+    up = (df["padj"] < 0.05) & (df[LFC] > lfc_threshold)
+    down = (df["padj"] < 0.05) & (df[LFC] < -lfc_threshold)
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+
+    ax.scatter(df.loc[~(up | down), LFC], df.loc[~(up | down), "logp"],
+               s=dot_size, c="lightgray", label="Not Sig")
+
+    ax.scatter(df.loc[down, LFC], df.loc[down, "logp"],
+               s=dot_size, c="cornflowerblue", label="Down")
+
+    ax.scatter(df.loc[up, LFC], df.loc[up, "logp"],
+               s=dot_size, c="firebrick", label="Up")
+
+    ax.axhline(-np.log10(0.05), c="gray", ls="--", lw=1)
+    ax.axvline(-lfc_threshold, c="gray", ls="--", lw=1)
+    ax.axvline(lfc_threshold, c="gray", ls="--", lw=1)
+
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+
+    for gene in genes:
+        hit = df[df["gene"].str.upper() == gene.upper()]
+
+        if not hit.empty:
+            row = hit.iloc[0]
+            x, y = row[LFC], row["logp"]
+
+            ax.scatter(x, y, s=text_size, c="black", zorder=5)
+            ax.annotate(
+                row["gene"],
+                (x, y),
+                xytext=(6, 6),
+                textcoords="offset points",
+                fontsize=7,
+                fontweight="bold",
+                arrowprops=dict(arrowstyle="-", lw=0.8),
+            )
+        else:
+            print(f"Gene not found: {gene}")
+
+    ax.set_xlabel("log2 Fold Change Shrunk")
+    ax.set_ylabel("-log10(padj)")
+    ax.legend(frameon=False)
+
+    plt.tight_layout()
+    fig.savefig(
+        os.path.join(out_dir, f"{name}.{FIG_FORMAT}"),
+        format=FIG_FORMAT,
+        bbox_inches="tight"
+    )
+    plt.close(fig)
