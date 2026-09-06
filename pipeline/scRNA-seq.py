@@ -1,8 +1,6 @@
 import gc
 import os
-from pipeline.config.constants import (
-    SINGLE_CELL_VAE_BATCH_SIZE, CPU_CORE_COUNT
-)
+from pipeline.config.constants import SINGLE_CELL_VAE_BATCH_SIZE, CPU_CORE_COUNT
 
 os.environ["NUMBA_NUM_THREADS"] = str(CPU_CORE_COUNT)
 os.environ["OMP_NUM_THREADS"] = str(CPU_CORE_COUNT)
@@ -28,9 +26,9 @@ sc.settings.n_jobs = CPU_CORE_COUNT
 if __name__ == "__main__":
     pre_h5ad_dir = find_env_dir("PRE_H5AD")
     MAIN_SERIES = "pbmc_human"
-    SUB_SERIES = "tcell"
+    SUB_SERIES = ""
     SPECIES = "human"
-    leiden_resolution = 2.0
+    leiden_resolution = 3.5
     only_cpu = False
 
     if SUB_SERIES:
@@ -42,41 +40,43 @@ if __name__ == "__main__":
     # Preprocessing each sample
     print("Loading data: " + SERIES + "...")
     loaded_adata = sc.read_h5ad(file)
-    
+
     if not only_cpu:
         assert isinstance(loaded_adata.X, csr_matrix)
         loaded_adata.X = loaded_adata.X.astype(np.float32)
         rsc.get.anndata_to_GPU(loaded_adata)
 
-    # Quality assessment by calculating QC metrics
-    def quality_assess(adata: AnnData) -> AnnData:
-        # Marking mitochondrial and ribosomal genes
-        mt_genes = extract_mt_genes(species=SPECIES)
-        mt_mask = adata.var.index.isin(mt_genes)
-        ribo_mask = adata.var.index.str.upper().str.startswith(("RPS", "RPL"))
-
-        adata.var["mt"] = np.asarray(mt_mask, dtype=bool)
-        adata.var["ribo"] = np.asarray(ribo_mask, dtype=bool)
-
-        # qc_vars: List of categories that you want to make as a QC metrics (It must be set as a boolean list in AnnData.obs)
-        if not only_cpu:
-            rsc.pp.calculate_qc_metrics(
-                adata, qc_vars=["mt", "ribo"], log1p=True,
-            )
-        else :
-            sc.pp.calculate_qc_metrics(
-                adata, qc_vars=["mt", "ribo"], log1p=True, inplace=True
-            )
-        return adata
-
-    print("Assessing quality...")
-    quality_assessed_adata = quality_assess(loaded_adata)
-
     # Cell and gene filtering
-    MIN_GENES = 500
+    MIN_GENES = 200
     MIN_CELLS = 20
     MIN_COUNTS = 1000
-    if SUB_SERIES == "" :
+    if SUB_SERIES == "":
+        # Quality assessment by calculating QC metrics
+        def quality_assess(adata: AnnData) -> AnnData:
+            # Marking mitochondrial and ribosomal genes
+            mt_genes = extract_mt_genes(species=SPECIES)
+            mt_mask = adata.var.index.isin(mt_genes)
+            ribo_mask = adata.var.index.str.upper().str.startswith(("RPS", "RPL"))
+
+            adata.var["mt"] = np.asarray(mt_mask, dtype=bool)
+            adata.var["ribo"] = np.asarray(ribo_mask, dtype=bool)
+
+            # qc_vars: List of categories that you want to make as a QC metrics (It must be set as a boolean list in AnnData.obs)
+            if not only_cpu:
+                rsc.pp.calculate_qc_metrics(
+                    adata,
+                    qc_vars=["mt", "ribo"],
+                    log1p=True,
+                )
+            else:
+                sc.pp.calculate_qc_metrics(
+                    adata, qc_vars=["mt", "ribo"], log1p=True, inplace=True
+                )
+            return adata
+
+        print("Assessing quality...")
+        quality_assessed_adata = quality_assess(loaded_adata)
+
         if not only_cpu:
             rsc.pp.filter_cells(quality_assessed_adata, min_genes=MIN_GENES)
             rsc.pp.filter_genes(quality_assessed_adata, min_cells=MIN_CELLS)
@@ -86,17 +86,17 @@ if __name__ == "__main__":
             sc.pp.filter_genes(quality_assessed_adata, min_cells=MIN_CELLS)
             sc.pp.filter_cells(quality_assessed_adata, min_counts=MIN_COUNTS)
 
-    # Filtered cells and genes necessitate re-calculation of QC metrics
-    quality_assessed_adata = quality_assess(quality_assessed_adata)
+        # This plot will take a lot of time
+        # plot.plot_qc(quality_assessed_adata, SERIES)
 
-    # This plot will take a lot of time
-    # plot.plot_qc(quality_assessed_adata, SERIES)
+        # Cytoplasmic RNA in dead cells leaks out, resulting in a higher proportion of remaining mitochondrial RNA
+        filtered_adata = quality_assessed_adata[
+            (quality_assessed_adata.obs["pct_counts_mt"] < 15)
+        ].copy()
+    else:
+        quality_assessed_adata = loaded_adata
+        filtered_adata = quality_assessed_adata
 
-    # Cytoplasmic RNA in dead cells leaks out, resulting in a higher proportion of remaining mitochondrial RNA
-    filtered_adata = quality_assessed_adata[
-        (quality_assessed_adata.obs["pct_counts_mt"] < 15)
-    ].copy()
-    
     del loaded_adata
     del quality_assessed_adata
     gc.collect()
@@ -104,7 +104,7 @@ if __name__ == "__main__":
     if only_cpu:
         filtered_adata = fix_nullable_strings(filtered_adata)
         gc.collect()
- 
+
     filtered_h5ad_dir = find_env_dir("FILTERED_H5AD")
     filtered_adata.write_h5ad(
         os.path.join(filtered_h5ad_dir, SERIES + "_filtered.h5ad"), compression="gzip"
@@ -121,10 +121,8 @@ if __name__ == "__main__":
         )
     else:
         sc.pp.highly_variable_genes(
-            filtered_adata,
-            n_top_genes=N_TOP_GENES,
-            flavor="seurat_v3"
-        )        
+            filtered_adata, n_top_genes=N_TOP_GENES, flavor="seurat_v3"
+        )
         filtered_adata = fix_nullable_strings(filtered_adata)
 
     if not only_cpu:
@@ -132,7 +130,7 @@ if __name__ == "__main__":
         gc.collect()
         cp.get_default_memory_pool().free_all_blocks()
     scvi_adata = filtered_adata[:, filtered_adata.var["highly_variable"]].copy()
-    
+
     # Setting up AnnData for scVI model with batch effects
     scvi.model.SCVI.setup_anndata(
         scvi_adata,
@@ -154,7 +152,7 @@ if __name__ == "__main__":
 
     # latent_representation: (cell, latent_space_dimension)
     if filtered_adata.obs_names.equals(scvi_adata.obs_names):
-        filtered_adata.obsm["X_scvi"] = model.get_latent_representation() #type: ignore
+        filtered_adata.obsm["X_scvi"] = model.get_latent_representation()  # type: ignore
     else:
         raise ValueError(
             "Cell names do not match between filtered_adata and scvi_adata"
@@ -185,9 +183,13 @@ if __name__ == "__main__":
     # Store settings in .uns["neighbors"] and connectivity matrices in .obsp
     print("Constructing neighborhood graph...")
     if not only_cpu:
-        rsc.pp.neighbors(filtered_adata, n_neighbors=15, use_rep="X_scvi", metric="cosine")
+        rsc.pp.neighbors(
+            filtered_adata, n_neighbors=15, use_rep="X_scvi", metric="cosine"
+        )
     else:
-        sc.pp.neighbors(filtered_adata, n_neighbors=15, use_rep="X_scvi", metric="cosine")
+        sc.pp.neighbors(
+            filtered_adata, n_neighbors=15, use_rep="X_scvi", metric="cosine"
+        )
 
     # Embeds the neighborhood graph into 2D space using UMAP algorithm (optimized via SGD, Stochastic Gradient Descent)
     # You can change n_components to 3 for 3D UMAP
@@ -195,7 +197,13 @@ if __name__ == "__main__":
     if not only_cpu:
         rsc.tl.umap(filtered_adata, n_components=2, min_dist=0.3)
     else:
-        sc.tl.umap(filtered_adata, n_components=2, min_dist=0.3, init_pos = "random", random_state = 0)
+        sc.tl.umap(
+            filtered_adata,
+            n_components=2,
+            min_dist=0.3,
+            init_pos="random",
+            random_state=0,
+        )
     # If the clusters appear too clumped or merged, try decreasing n_neighbors and min_dist
 
     # Clustering cells using leiden algorithm, maximizes modularity which is defined based on its intergroup connectivity and expected (random) connectivity
@@ -204,7 +212,13 @@ if __name__ == "__main__":
     if not only_cpu:
         rsc.tl.leiden(filtered_adata, resolution=leiden_resolution)
     else:
-        sc.tl.leiden(filtered_adata, resolution=leiden_resolution, flavor="igraph", n_iterations=-1, directed=False)
+        sc.tl.leiden(
+            filtered_adata,
+            resolution=leiden_resolution,
+            flavor="igraph",
+            n_iterations=-1,
+            directed=False,
+        )
 
     plot.plot_umap(filtered_adata, SERIES)
 
@@ -213,7 +227,8 @@ if __name__ == "__main__":
         os.path.join(
             clustered_h5ad_dir,
             SERIES + ".h5ad",
-        ), compression = "gzip"
+        ),
+        compression="gzip",
     )
 
     print("Clustering completed")

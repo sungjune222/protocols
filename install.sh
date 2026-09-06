@@ -1,10 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-wget https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-keyring_1.1-1_all.deb
-sudo dpkg -i cuda-keyring_1.1-1_all.deb
-rm cuda-keyring_1.1-1_all.deb
-rm cuda-keyring_1.1-1_all.deb.1
+CUDA_KEYRING="cuda-keyring_1.1-1_all.deb"
+wget -O "$CUDA_KEYRING" \
+    https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i "$CUDA_KEYRING"
+rm -f "$CUDA_KEYRING"
 
 sudo apt update
 sudo apt install -y cuda-toolkit-13-0
@@ -22,7 +23,6 @@ sudo systemctl restart docker
 
 sudo apt install -y acl
 sudo usermod -aG docker $USER
-newgrp docker
 sudo chown -R $USER:$USER .
 sudo setfacl -R -d -m u:$USER:rwx .
 sudo setfacl -R -m u:$USER:rwx .
