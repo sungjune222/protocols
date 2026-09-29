@@ -3,20 +3,22 @@ import matplotlib
 # Supports file saving only; GUI rendering is not available
 matplotlib.use("Agg")
 
-import colorsys
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as patheffects
 import numpy as np
 import os
 import pandas as pd
+import re
 import scanpy as sc
 import scvi
 import seaborn as sns
+import textwrap
 import warnings
+from adjustText import adjust_text
 from anndata import AnnData
-from math import gcd
 from matplotlib.axes import Axes
 from scipy.sparse import csr_matrix
+from scipy.stats import pearsonr, spearmanr
 from typing import List, Dict, Any, Optional
 from pipeline.utils.env import find_env_dir
 from pipeline.utils.pseudobulk import pseudobulk
@@ -428,105 +430,211 @@ def plot_dotplot(
     plt.close("all")
 
 
-def plot_violin(adata: AnnData, gene: str) -> None:
-    violin_plots_dir = find_env_dir("VIOLIN_PLOTS")
-    # series_name = adata.obs["series"].iloc[0]
-    series_name = "SCP1038"
+def plot_violin(
+    adata: AnnData,
+    series: str,
+    gene: list[str],
+    group: str = "leiden",
+    group_order: list | None = None, 
+) -> None:
+    out_dir = os.path.join(find_env_dir("VIOLIN_PLOTS"), series)
+    os.makedirs(out_dir, exist_ok=True)
 
-    num_categories = len(adata.obs["leiden"].unique())
-    width_per_category = 0.6
-    fig_width = max(5, num_categories * width_per_category)
-    fig_height = 6
+    data = adata.copy()
+    sc.pp.normalize_total(data, target_sum=1e4)
+    sc.pp.log1p(data)
 
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    ax.set_yscale("symlog", linthresh=1)
+    df = sc.get.obs_df(data, keys=[group, *gene], use_raw=False)
+    df[group] = df[group].astype("category").cat.remove_unused_categories()
+    groups = df[group].cat.categories
 
-    sc.pl.violin(
-        adata,
-        keys=gene,
-        groupby="leiden",
-        rotation=90,
-        ax=ax,
-        show=False,
-        use_raw=False,
-        stripplot=False,
-        density_norm="count",
-    )
-    ax.set_ylim((0, 100))
+    if group_order is None:
+        try:
+            group_order = sorted(groups, key=lambda x: int(x))
+        except (ValueError, TypeError):
+            group_order = sorted(groups)
+    else: 
+        missing = [g for g in groups if g not in group_order]
+        extra = [g for g in group_order if g not in groups]
+        order_index = pd.Index(group_order)
+        duplicated = order_index[order_index.duplicated()].tolist()
 
-    filename = f"{series_name}_{gene}_violin.{FIG_FORMAT}"
-    fig.savefig(
-        os.path.join(violin_plots_dir, filename), format=FIG_FORMAT, bbox_inches="tight"
-    )
-    plt.close("all")
+        if missing or extra or duplicated:
+            raise ValueError(
+                f"Invalid group_order: missing={missing}, "
+                f"extra={extra}, duplicated={duplicated}"
+            )
+    ymax = max(1, int(np.ceil(df[gene].to_numpy().max())))
 
-def make_distinct_colors(n):
-    step = max(1, n // 2 - 1)
-    while gcd(step, n) != 1:
-        step -= 1
+    with plt.rc_context({
+        "font.family": "DejaVu Sans",
+        "font.size": 9,
+        "axes.linewidth": 0.6,
+        "pdf.fonttype": 42,
+    }), sns.axes_style("ticks"):
+        fig, axes = plt.subplots(
+            len(gene), 1,
+            sharex=True, sharey=True, squeeze=False,
+            figsize=(
+                max(5, df[group].nunique() * 0.8 + 1.5),
+                max(2.5, len(gene) * 0.7 + 1),
+            ),
+            layout="constrained",
+        )
 
-    colors = []
-    for i in range(n):
-        h = ((i * step) % n) / n
-        s = 0.65 + 0.25 * (i % 2)
-        v = 0.80 + 0.15 * ((i // 2) % 2)
-        colors.append(colorsys.hsv_to_rgb(h, s, v))
+        colors = sns.husl_palette(len(gene), s=0.55, l=0.60)
 
-    return colors
+        for ax, g, color in zip(axes[:, 0], gene, colors):
+            sns.violinplot(
+                data=df, x=group, y=g, ax=ax,
+                order=group_order, 
+                color=color, linecolor="#333333",
+                inner=None, cut=0,
+                density_norm="width", linewidth=0.6,
+            )
+            ax.set(
+                xlabel="", ylabel="",
+                ylim=(0, ymax * 1.05), yticks=[0, ymax],
+            )
+            ax.text(
+                1.02, 0.5, g, transform=ax.transAxes,
+                ha="left", va="center", fontstyle="italic",
+            )
+            ax.tick_params(axis="both", labelsize=9, length=3, width=0.6)
+            sns.despine(ax=ax)
+
+        axes[-1, 0].tick_params(axis="x", labelrotation=0)
+        fig.supylabel("Log-normalized expression", fontsize=10)
+
+        fig.savefig(
+            os.path.join(out_dir, f"violin_by_{group}.{FIG_FORMAT}"),
+            format=FIG_FORMAT, dpi=300,
+            bbox_inches="tight", facecolor="white",
+        )
+        plt.close(fig)
 
 def plot_proportions(
-        adata: AnnData,
-        series_name: str,
-        group_key: str,
-        sample_key: str,
-        exclude_group: list = ["Doublet", "LowCount", "LowQuality"] # Groups to exclude from the plot
-    ):
-    proportions_plots_dir = find_env_dir("PROPORTION_PLOTS")
-    proportions_plots_dir = os.path.join(proportions_plots_dir, series_name)
-    os.makedirs(proportions_plots_dir, exist_ok=True)
+    adata: AnnData,
+    series: str,
+    group_key: str,
+    sample_key: str,
+    exclude_group: list[str] | None = None,
+    group_order: list | None = None,
+    sample_order: list | None = None,
+    connect: bool = False,
+) -> None:
+    out_dir = os.path.join(find_env_dir("PROPORTION_PLOTS"), series)
+    os.makedirs(out_dir, exist_ok=True)
+
+    if exclude_group is None:
+        exclude_group = ["Doublet", "LowCount", "LowQuality"]
 
     obs_df = adata.obs[~adata.obs[group_key].isin(exclude_group)]
-
     prop_df = pd.crosstab(
-        obs_df[group_key].to_numpy(), 
-        obs_df[sample_key].to_numpy(), 
-        normalize='index'
+        obs_df[group_key].to_numpy(),
+        obs_df[sample_key].to_numpy(),
+        normalize="index",
     )
 
-    try:
-        prop_df = prop_df.loc[sorted(prop_df.index, key=lambda x: int(x))]
-    except Exception:
-        prop_df = prop_df.sort_index()
-    
-    colors = make_distinct_colors(prop_df.shape[1])
+    if prop_df.empty:
+        raise ValueError("No valid data available for plotting")
+
+    if group_order is not None:
+        missing = [g for g in prop_df.index if g not in group_order]
+        extra = [g for g in group_order if g not in prop_df.index]
+        order_index = pd.Index(group_order)
+        duplicated = order_index[order_index.duplicated()].tolist()
+
+        if missing or extra or duplicated:
+            raise ValueError(
+                f"group_order missing: missing={missing}, "
+                f"extra groups={extra}, duplicated={duplicated}"
+            )
+        prop_df = prop_df.loc[group_order]
+    else:
+        try:
+            prop_df = prop_df.loc[sorted(prop_df.index, key=lambda x: int(x))]
+        except (ValueError, TypeError):
+            prop_df = prop_df.sort_index()
+
+    if sample_order is not None:
+        missing = [s for s in prop_df.columns if s not in sample_order]
+        extra = [s for s in sample_order if s not in prop_df.columns]
+        order_index = pd.Index(sample_order)
+        duplicated = order_index[order_index.duplicated()].tolist()
+
+        if missing or extra or duplicated:
+            raise ValueError(
+                f"Invalid sample_order: missing={missing}, "
+                f"extra={extra}, duplicated={duplicated}"
+            )
+
+        prop_df = prop_df.loc[:, sample_order]
+
+    palette = [
+        "#587FA2", "#D5A15B", "#77A69A", "#B98191",
+        "#9487B2", "#9AA6AF", "#C5BE89", "#C48D70",
+    ]
+    n_colors = prop_df.shape[1]
+    colors = (
+        palette[:n_colors]
+        if n_colors <= len(palette)
+        else sns.husl_palette(n_colors, s=0.55, l=0.65)
+    )
+
+    width = 0.7
     fig, ax = plt.subplots(figsize=(10, 6))
 
     prop_df.plot(
-        kind='bar', 
-        stacked=True, 
-        ax=ax, 
+        kind="bar",
+        stacked=True,
+        ax=ax,
         color=colors,
-        edgecolor='none'
+        width=width,
+        edgecolor="none",
     )
 
-    plt.title(f"Proportion of {sample_key} by {group_key}", fontsize=14)
-    plt.xlabel(group_key.capitalize(), fontsize=12)
-    plt.ylabel("Proportion", fontsize=12)
-    plt.xticks(rotation=45, ha='right') 
-    
-    plt.legend(
-        title=sample_key, 
-        bbox_to_anchor=(1.05, 1), 
-        loc='upper left', 
-        borderaxespad=0.
+    if connect:
+        bounds = np.column_stack([
+            np.zeros(len(prop_df)),
+            prop_df.cumsum(axis=1).to_numpy(),
+        ])
+        for i in range(len(prop_df) - 1):
+            for j, color in enumerate(colors):
+                ax.fill_between(
+                    [i + width / 2, i + 1 - width / 2],
+                    bounds[i:i + 2, j],
+                    bounds[i:i + 2, j + 1],
+                    color=color,
+                    alpha=0.5,
+                    linewidth=0,
+                    zorder=0,
+                )
+
+    ax.set_title(f"Proportion of {sample_key} by {group_key}", fontsize=14)
+    ax.set_xlabel(group_key.capitalize(), fontsize=12)
+    ax.set_ylabel("Proportion", fontsize=12)
+    ax.set_ylim(0, 1)
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+    ax.spines[["top", "right"]].set_visible(False)
+
+    ax.legend(
+        title=sample_key,
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
+        borderaxespad=0,
+        frameon=False,
     )
 
-    plt.tight_layout()
-    filename = f"proportion_{group_key}_by_{sample_key}.{FIG_FORMAT}"
+    fig.tight_layout()
+    suffix = "_connected" if connect else ""
+    filename = f"proportion_{group_key}_by_{sample_key}{suffix}.{FIG_FORMAT}"
     fig.savefig(
-        os.path.join(proportions_plots_dir, filename), format=FIG_FORMAT, bbox_inches="tight"
+        os.path.join(out_dir, filename),
+        format=FIG_FORMAT,
+        bbox_inches="tight",
     )
-    plt.close("all")
+    plt.close(fig)
 
 def plot_volcano(
         deg: pd.DataFrame,
@@ -535,7 +643,7 @@ def plot_volcano(
         genes: List[str],
         lfc_threshold: float = 0.5,
         dot_size: int = 3,
-        text_size: int = 10,
+        text_size: int = 16,
         xlim=(-5, 5),
         ylim=(0, 50),
     ):
@@ -568,34 +676,324 @@ def plot_volcano(
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
 
+    visible = df[df[LFC].between(*xlim) & df["logp"].between(*ylim)]
+    texts, xs, ys = [], [], []
+
+    dx = (xlim[1] - xlim[0]) * 0.12
+    dy = (ylim[1] - ylim[0]) * 0.10
+
     for gene in genes:
-        hit = df[df["gene"].str.upper() == gene.upper()]
-
-        if not hit.empty:
-            row = hit.iloc[0]
-            x, y = row[LFC], row["logp"]
-
-            ax.scatter(x, y, s=text_size, c="black", zorder=5)
-            ax.annotate(
-                row["gene"],
-                (x, y),
-                xytext=(6, 6),
-                textcoords="offset points",
-                fontsize=7,
-                fontweight="bold",
-                arrowprops=dict(arrowstyle="-", lw=0.8),
-            )
-        else:
+        hit = df[df["gene"].str.upper() == gene.upper()]  
+        if hit.empty:
             print(f"Gene not found: {gene}")
+            continue
+
+        row = hit.iloc[0]
+        x, y = row[LFC], row["logp"]
+
+        if not (xlim[0] <= x <= xlim[1] and ylim[0] <= y <= ylim[1]):
+            print(f"Gene outside plot limits: {gene} (x={x:.2f}, y={y:.2f})")
+            continue
+        xs.append(x)
+        ys.append(y)
+
+        ax.scatter(x, y, s=30, c="black", zorder=5)
+        texts.append(ax.text(
+            x + (dx if x >= 0 else -dx),
+            min(y + dy, ylim[1] - 0.05 * (ylim[1] - ylim[0])), 
+            row["gene"],
+            fontsize=text_size,
+            fontweight="normal",
+            ha="center", va="center", zorder=6,
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=0.3),
+        ))
 
     ax.set_xlabel("log2 Fold Change Shrunk")
     ax.set_ylabel("-log10(padj)")
-    ax.legend(frameon=False)
+    legend = ax.legend(frameon=False)
+    fig.tight_layout()
 
-    plt.tight_layout()
+    if texts:
+        adjust_text(
+            texts,
+            x=xs, y=ys, 
+            target_x=xs, target_y=ys,
+            objects=[legend],
+            ax=ax,
+            expand=(1.3, 1.6), 
+            force_text=(0.8, 1.0), 
+            force_pull=0, 
+            ensure_inside_axes=True,
+            min_arrow_len=0,
+            iter_lim=1000, 
+            arrowprops=dict(arrowstyle="-", color="#666666", lw=0.8),
+        )
+    
     fig.savefig(
         os.path.join(out_dir, f"{name}.{FIG_FORMAT}"),
         format=FIG_FORMAT,
         bbox_inches="tight"
     )
     plt.close(fig)
+
+def plot_gsea(
+    result: pd.DataFrame,
+    series: str,
+    name: str,
+    library: str | None = None,
+    keywords: list[str] | None = None,
+    fdr: float = 0.05,
+    direction: str | None = None, 
+    top_n: int | None = 10, 
+) -> pd.DataFrame:
+    if direction not in (None, "positive", "negative"):
+        raise ValueError("direction must be None, 'positive', or 'negative'")
+    if top_n is not None and top_n < 1:
+        raise ValueError("top_n must be a positive integer or None.")
+
+    out_dir = os.path.join(find_env_dir("ENRICHMENT"), series)
+    os.makedirs(out_dir, exist_ok=True)
+
+    df = result.copy()
+    if library is not None:
+        df = df[df["Library"] == library].copy()
+    if df["Library"].nunique() > 1:
+        raise ValueError("Select one library with library=...")
+
+    df[["NES", "FDR q-val"]] = df[["NES", "FDR q-val"]].astype(float)
+    df = df.dropna(subset=["NES", "FDR q-val"])
+
+    if keywords is None:
+        keywords = ["cell"]
+
+    names = df["Term"].str.replace("_", " ", regex=False)
+    related = names.str.contains(
+        "|".join(map(re.escape, keywords)), case=False, na=False,
+    )
+
+    df = df[related & (df["FDR q-val"] < fdr)] 
+    if direction == "positive":
+        df = df[df["NES"] > 0]
+    elif direction == "negative":
+        df = df[df["NES"] < 0]
+
+    df = df.sort_values("NES", key=lambda s: s.abs(), ascending=False)
+    if top_n is not None:
+        df = df.head(top_n)
+
+    if df.empty:
+        raise ValueError("No pathways pass the keyword, direction, and FDR filters.")
+
+    labels = (
+        df["Term"]
+        .str.replace(r"^GOBP_", "", regex=True)
+        .str.replace("_", " ", regex=False)
+        .str.replace(r"\s*\(GO:\d+\)$", "", regex=True)
+        .str.capitalize()
+        .map(lambda s: textwrap.fill(s, width=40) if isinstance(s, str) else "")
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(8, max(3, len(df) * 0.6)),
+        layout="constrained",
+    )
+    y = np.arange(len(df))
+    colors = np.where(df["NES"] < 0, "#4C72B0", "#C44E52") 
+    ax.barh(y, df["NES"], color=colors, height=0.7)
+    ax.set_yticks(y, labels=labels)
+    ax.invert_yaxis() 
+    ax.axvline(0, color="gray", lw=0.8) 
+
+    ax.set_xlabel("Normalized enrichment score (NES)")
+    ax.set_title(f"{name.replace('_', ' ')} | FDR < {fdr}")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.tick_params(axis="y", length=0, labelsize=10)
+
+    suffix = f"_{direction}" if direction else "" 
+    filename = f"gsea_{name}{suffix}"
+
+    fig.savefig(
+        os.path.join(out_dir, f"{filename}.{FIG_FORMAT}"),
+        format=FIG_FORMAT, dpi=300, bbox_inches="tight",
+    )
+    plt.close(fig)
+    return df
+
+def plot_species_scatter(
+    human_deg: pd.DataFrame,
+    mouse_deg: pd.DataFrame,
+    series: str,
+    name: str,
+    orthologs: pd.DataFrame | None = None,
+    genes: list[str] | None = None,
+    lfc_threshold: float = 0.5,
+    fdr: float = 0.05,
+    text_size: int = 8,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+) -> pd.DataFrame:
+    out_dir = os.path.join(find_env_dir("SCATTER_PLOTS"), series)
+    os.makedirs(out_dir, exist_ok=True)
+
+    cols = ["gene", "log2FoldChange_shrunk", "padj"]
+    human = human_deg[cols].set_axis(
+        ["human_gene", "human_lfc", "human_padj"], axis=1,
+    )
+    mouse = mouse_deg[cols].set_axis(
+        ["mouse_gene", "mouse_lfc", "mouse_padj"], axis=1,
+    )
+
+    if orthologs is None: 
+        human["_match"] = human["human_gene"].str.upper()
+        mouse["_match"] = mouse["mouse_gene"].str.upper()
+
+        df = (
+            human.dropna(subset=["_match"])
+            .merge(
+                mouse.dropna(subset=["_match"]),
+                on="_match",
+                how="inner", 
+                validate="one_to_one",
+            )
+            .drop(columns="_match")
+        )
+    else: 
+        mapping = orthologs[["human_gene", "mouse_gene"]].dropna().drop_duplicates()
+
+        if mapping["human_gene"].duplicated().any() or mapping["mouse_gene"].duplicated().any():
+            raise ValueError("orthologs must contain one-to-one gene pairs.")
+
+        df = (
+            mapping
+            .merge(human, on="human_gene", how="inner", validate="one_to_one")
+            .merge(mouse, on="mouse_gene", how="inner", validate="one_to_one")
+        )
+
+    numeric = ["human_lfc", "mouse_lfc", "human_padj", "mouse_padj"]
+    df[numeric] = df[numeric].astype(float).replace([np.inf, -np.inf], np.nan)
+    df = df.dropna(subset=["human_lfc", "mouse_lfc"]).copy()
+
+    x, y = df["human_lfc"], df["mouse_lfc"]
+    if len(df) < 3 or x.nunique() < 2 or y.nunique() < 2:
+        raise ValueError("At least 3 matched genes with nonconstant LFC values are required.")
+
+    sig = (df["human_padj"] < fdr) & (df["mouse_padj"] < fdr)
+    up = sig & (x > lfc_threshold) & (y > lfc_threshold)
+    down = sig & (x < -lfc_threshold) & (y < -lfc_threshold)
+    opposite = (
+        sig & (x * y < 0)
+        & (x.abs() > lfc_threshold) & (y.abs() > lfc_threshold)
+    )
+    df["status"] = np.select(
+        [up, down, opposite, sig],
+        ["Up in both", "Down in both", "Opposite", "LFC cutoff not met"],
+        default="padj cutoff not met",
+    )
+
+    r = float(pearsonr(x, y).statistic) #type: ignore
+    rho = float(spearmanr(x, y).statistic) #type: ignore
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+    palette = {
+        "padj cutoff not met": "#D0D0D0",
+        "LFC cutoff not met": "#929BA5",
+        "Down in both": "#4C72B0",
+        "Up in both": "#C44E52",
+        "Opposite": "#DD9853",
+    }
+    for label, color in palette.items():
+        d = df[df["status"] == label]
+        ax.scatter(
+            d["human_lfc"], d["mouse_lfc"],
+            s=8, color=color, alpha=0.7, edgecolors="none",
+            rasterized=True, label=f"{label} (n={len(d):,})",
+        )
+
+    lim = max(1, float(np.abs(df[["human_lfc", "mouse_lfc"]].to_numpy()).max()) * 1.15)
+    xlim = xlim if xlim is not None else (-lim, lim)  # 추가
+    ylim = ylim if ylim is not None else (-lim, lim)  # 추가
+
+    if xlim[0] >= xlim[1] or ylim[0] >= ylim[1]:
+        raise ValueError("Axis limits must satisfy min < max.")
+
+    ax.axline((0, 0), slope=1, ls=":", color="#BBBBBB", lw=0.8, zorder=0)
+    ax.axhline(0, color="#BBBBBB", lw=0.6, zorder=0)
+    ax.axvline(0, color="#BBBBBB", lw=0.6, zorder=0)
+
+    for cutoff in (-lfc_threshold, lfc_threshold):
+        ax.axhline(cutoff, color="gray", ls="--", lw=0.8, zorder=0)
+        ax.axvline(cutoff, color="gray", ls="--", lw=0.8, zorder=0)
+
+    ax.set(
+        xlim=xlim, ylim=ylim,
+        xlabel="Human log2 fold change (shrunk)",
+        ylabel="Mouse log2 fold change (shrunk)",
+        title=name.replace("_", " "),
+    )
+    ax.set_aspect("equal")
+
+    info = ax.text(
+        0.03, 0.97,
+        f"n = {len(df):,}\nPearson r = {r:.2f}\nSpearman ρ = {rho:.2f}",
+        transform=ax.transAxes, va="top", fontsize=10,
+        bbox=dict(facecolor="white", edgecolor="none", alpha=0.9),
+    )
+
+    wanted = {g.upper() for g in genes or []}
+    marked = df[
+        df["human_gene"].str.upper().isin(wanted)
+        | df["mouse_gene"].str.upper().isin(wanted)
+    ]
+    found = set(marked["human_gene"].str.upper()) | set(marked["mouse_gene"].str.upper())
+    for g in sorted(wanted - found):
+        print(f"Gene not found among matched pairs: {g}")
+
+    visible = (
+        marked["human_lfc"].between(*xlim)
+        & marked["mouse_lfc"].between(*ylim)
+    )
+    for g in marked.loc[~visible, "human_gene"]:
+        print(f"Gene outside plot limits: {g}")
+    marked = marked.loc[visible]
+
+    ax.scatter(
+        marked["human_lfc"], marked["mouse_lfc"],
+        s=45,
+        c=marked["status"].map(palette).tolist(),
+        edgecolors="black", linewidths=0.8, zorder=5,
+    )
+
+    texts = [
+        ax.text(
+            row.human_lfc, row.mouse_lfc, str(row.human_gene), #type: ignore
+            fontsize=text_size, fontweight="normal", zorder=6,
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=0.3),
+        )
+        for row in marked.itertuples()
+    ]
+
+    ax.legend(
+        bbox_to_anchor=(1.02, 1), loc="upper left",
+        frameon=False, markerscale=2,
+    )
+    fig.tight_layout()
+
+    if texts:
+        adjust_text(
+            texts,
+            x=marked["human_lfc"].to_numpy(),
+            y=marked["mouse_lfc"].to_numpy(),
+            objects=[info], ax=ax,
+            expand=(1.3, 1.6), force_text=(0.8, 1.0),
+            force_pull=0, min_arrow_len=0, iter_lim=1000,
+            arrowprops=dict(arrowstyle="-", color="#666666", lw=0.8),
+        )
+
+    fig.savefig(
+        os.path.join(out_dir, f"scatter_{name}.{FIG_FORMAT}"),
+        format=FIG_FORMAT, dpi=300, bbox_inches="tight",
+    )
+    plt.close(fig)
+
+    df.to_csv(os.path.join(out_dir, f"scatter_{name}.csv"), index=False)
+    return df
